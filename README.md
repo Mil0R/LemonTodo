@@ -35,3 +35,20 @@ cargo run -p lemontodo-tui -- done <task-id-prefix>
 ```
 
 This is not the final interactive TUI yet. It establishes the Rust workspace, core task model, SQLite persistence, and command surface that the TUI will build on.
+
+Running `ltd` without a subcommand opens the interactive terminal UI:
+
+```bash
+cargo run -p lemontodo-tui
+```
+
+Initial TUI controls:
+
+- `j` / `Down`: move down
+- `k` / `Up`: move up
+- `space`: toggle selected task done/open
+- `a`: add a task
+- `Enter`: submit task while adding
+- `Esc`: cancel add mode or quit from browse mode
+- `r`: refresh
+- `q`: quit

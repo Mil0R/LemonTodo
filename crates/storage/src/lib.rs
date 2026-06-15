@@ -93,14 +93,27 @@ impl TodoStore {
 
     pub fn mark_done(&self, id_prefix: &str) -> Result<Task> {
         let task = self.find_task_by_prefix(id_prefix)?;
+        self.set_task_status(task, TaskStatus::Done)
+    }
+
+    pub fn toggle_done(&self, id: Uuid) -> Result<Task> {
+        let task = self.find_task_by_id(id)?;
+        let status = match task.status {
+            TaskStatus::Open => TaskStatus::Done,
+            TaskStatus::Done | TaskStatus::Archived => TaskStatus::Open,
+        };
+        self.set_task_status(task, status)
+    }
+
+    fn set_task_status(&self, task: Task, status: TaskStatus) -> Result<Task> {
         let now = Utc::now();
         self.conn.execute(
-            "UPDATE tasks SET status = 'done', updated_at = ?1 WHERE id = ?2",
-            params![now.to_rfc3339(), task.id.to_string()],
+            "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status.as_str(), now.to_rfc3339(), task.id.to_string()],
         )?;
 
         Ok(Task {
-            status: TaskStatus::Done,
+            status,
             updated_at: now,
             ..task
         })
@@ -213,6 +226,20 @@ impl TodoStore {
             _ => bail!("multiple tasks match id prefix {prefix}"),
         }
     }
+
+    fn find_task_by_id(&self, id: Uuid) -> Result<Task> {
+        self.conn
+            .query_row(
+                "SELECT id, list_id, title, note_markdown, status, tags, due_date,
+                        sort_key, created_at, updated_at, deleted_at
+                 FROM tasks
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                params![id.to_string()],
+                row_to_task,
+            )
+            .optional()?
+            .with_context(|| format!("no task matches id {id}"))
+    }
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -286,5 +313,9 @@ mod tests {
 
         assert!(store.list_tasks(false).unwrap().is_empty());
         assert_eq!(store.list_tasks(true).unwrap().len(), 1);
+
+        let reopened = store.toggle_done(task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(store.list_tasks(false).unwrap().len(), 1);
     }
 }

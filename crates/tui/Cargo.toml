@@ -14,7 +14,8 @@ path = "src/main.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 dirs.workspace = true
 lemontodo-core = { path = "../core" }
 lemontodo-storage = { path = "../storage" }
-
+ratatui.workspace = true
