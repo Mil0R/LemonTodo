@@ -265,6 +265,7 @@ ltd sync apply
 ltd sync pull --json
 ```
 
+`ltd sync inbox` shows each pending remote operation with its apply status and skip/conflict reason when available.
 These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:

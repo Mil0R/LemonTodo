@@ -462,13 +462,19 @@ fn main() -> Result<()> {
                     for remote in pending {
                         let operation = remote.operation;
                         println!(
-                            "{} {} {} rev:{} {} cursor:{}",
+                            "{} {} {} rev:{} {} cursor:{} status:{}{}",
                             short_id(&operation.id.to_string()),
                             operation.object_type.as_str(),
                             operation.operation_type.as_str(),
                             operation.object_revision,
                             operation.object_id,
-                            remote.server_cursor
+                            remote.server_cursor,
+                            remote.apply_status,
+                            remote
+                                .apply_reason
+                                .as_deref()
+                                .map(|reason| format!(" reason:{reason}"))
+                                .unwrap_or_default()
                         );
                     }
                 }

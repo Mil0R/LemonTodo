@@ -26,6 +26,8 @@ pub struct RemoteOperation {
     pub server_cursor: String,
     pub pulled_at: DateTime<Utc>,
     pub applied_at: Option<DateTime<Utc>>,
+    pub apply_status: String,
+    pub apply_reason: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -350,8 +352,9 @@ impl TodoStore {
             let mut stmt = tx.prepare(
                 "INSERT OR IGNORE INTO remote_operations (
                     id, operation_id, device_id, object_id, object_revision,
-                    object_type, operation_type, operation_json, server_cursor, pulled_at, applied_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+                    object_type, operation_type, operation_json, server_cursor, pulled_at,
+                    applied_at, apply_status, apply_reason
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, 'pending', NULL)",
             )?;
             for operation in operations {
                 inserted += stmt.execute(params![
@@ -374,7 +377,7 @@ impl TodoStore {
 
     pub fn pending_remote_operations(&self) -> Result<Vec<RemoteOperation>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, operation_json, server_cursor, pulled_at, applied_at
+            "SELECT id, operation_json, server_cursor, pulled_at, applied_at, apply_status, apply_reason
              FROM remote_operations
              WHERE applied_at IS NULL
              ORDER BY pulled_at ASC, operation_id ASC",
@@ -411,6 +414,11 @@ impl TodoStore {
                 (ObjectType::List, OperationType::Create) => self.apply_remote_list_create(&remote),
                 (ObjectType::Task, OperationType::Create) => self.apply_remote_task_create(&remote),
                 _ => {
+                    self.mark_remote_operation_blocked(
+                        remote.id,
+                        "skipped",
+                        "only create operations can be applied automatically",
+                    )?;
                     summary.skipped += 1;
                     continue;
                 }
@@ -418,8 +426,14 @@ impl TodoStore {
 
             match result {
                 RemoteApplyResult::Applied => summary.applied += 1,
-                RemoteApplyResult::Skipped => summary.skipped += 1,
-                RemoteApplyResult::Conflict => summary.conflicts += 1,
+                RemoteApplyResult::Skipped(reason) => {
+                    self.mark_remote_operation_blocked(remote.id, "skipped", reason)?;
+                    summary.skipped += 1;
+                }
+                RemoteApplyResult::Conflict(reason) => {
+                    self.mark_remote_operation_blocked(remote.id, "conflict", reason)?;
+                    summary.conflicts += 1;
+                }
             }
         }
 
@@ -895,7 +909,9 @@ impl TodoStore {
                 operation_json TEXT NOT NULL,
                 server_cursor TEXT NOT NULL,
                 pulled_at TEXT NOT NULL,
-                applied_at TEXT
+                applied_at TEXT,
+                apply_status TEXT NOT NULL DEFAULT 'pending',
+                apply_reason TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_remote_operations_pending
@@ -927,6 +943,13 @@ impl TodoStore {
             "object_revision",
             "INTEGER NOT NULL DEFAULT 1",
         )?;
+        add_column_if_missing(
+            &self.conn,
+            "remote_operations",
+            "apply_status",
+            "TEXT NOT NULL DEFAULT 'pending'",
+        )?;
+        add_column_if_missing(&self.conn, "remote_operations", "apply_reason", "TEXT")?;
         Ok(())
     }
 
@@ -1061,7 +1084,9 @@ impl TodoStore {
         let list = remote_operation_payload::<List>(&remote.operation, "list")?;
         if self.find_list_by_id(list.id)?.is_some() || self.find_list_by_name(&list.name)?.is_some()
         {
-            return Ok(RemoteApplyResult::Conflict);
+            return Ok(RemoteApplyResult::Conflict(
+                "list id or name already exists locally",
+            ));
         }
 
         self.conn.execute(
@@ -1082,10 +1107,14 @@ impl TodoStore {
     fn apply_remote_task_create(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
         let task = remote_operation_payload::<Task>(&remote.operation, "task")?;
         if self.find_task_any_by_id(task.id)?.is_some() {
-            return Ok(RemoteApplyResult::Conflict);
+            return Ok(RemoteApplyResult::Conflict(
+                "task id already exists locally",
+            ));
         }
         if self.find_list_by_id(task.list_id)?.is_none() {
-            return Ok(RemoteApplyResult::Skipped);
+            return Ok(RemoteApplyResult::Skipped(
+                "task list does not exist locally yet",
+            ));
         }
 
         self.conn.execute(
@@ -1114,8 +1143,20 @@ impl TodoStore {
 
     fn mark_remote_operation_applied(&self, id: Uuid) -> Result<()> {
         self.conn.execute(
-            "UPDATE remote_operations SET applied_at = ?1 WHERE id = ?2",
+            "UPDATE remote_operations
+             SET applied_at = ?1, apply_status = 'applied', apply_reason = NULL
+             WHERE id = ?2",
             params![Utc::now().to_rfc3339(), id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn mark_remote_operation_blocked(&self, id: Uuid, status: &str, reason: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE remote_operations
+             SET apply_status = ?1, apply_reason = ?2
+             WHERE id = ?3 AND applied_at IS NULL",
+            params![status, reason, id.to_string()],
         )?;
         Ok(())
     }
@@ -1146,8 +1187,8 @@ impl TodoStore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteApplyResult {
     Applied,
-    Skipped,
-    Conflict,
+    Skipped(&'static str),
+    Conflict(&'static str),
 }
 
 fn row_to_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<List> {
@@ -1192,6 +1233,8 @@ fn row_to_remote_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteOp
         server_cursor: row.get(2)?,
         pulled_at: parse_datetime(row.get::<_, String>(3)?)?,
         applied_at: applied_at.map(parse_datetime).transpose()?,
+        apply_status: row.get(5)?,
+        apply_reason: row.get(6)?,
     })
 }
 
@@ -1599,6 +1642,8 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].operation.id, operation.id);
         assert_eq!(pending[0].server_cursor, "cursor-1");
+        assert_eq!(pending[0].apply_status, "pending");
+        assert_eq!(pending[0].apply_reason, None);
         assert_eq!(store.pending_remote_operation_count().unwrap(), 1);
     }
 
@@ -1706,6 +1751,86 @@ mod tests {
         assert_eq!(summary.applied, 0);
         assert_eq!(summary.skipped, 1);
         assert_eq!(summary.conflicts, 0);
-        assert_eq!(store.pending_remote_operation_count().unwrap(), 1);
+        let pending = store.pending_remote_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].apply_status, "skipped");
+        assert_eq!(
+            pending[0].apply_reason,
+            Some("task list does not exist locally yet".to_owned())
+        );
+    }
+
+    #[test]
+    fn marks_unsupported_remote_operations_as_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: Uuid::new_v4(),
+            object_revision: 2,
+            object_type: ObjectType::Task,
+            operation_type: OperationType::Update,
+            payload: json!({ "task": { "title": "unsupported update" } }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        store
+            .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
+            .unwrap();
+        let summary = store.apply_pending_remote_creates().unwrap();
+        assert_eq!(summary.applied, 0);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.conflicts, 0);
+
+        let pending = store.pending_remote_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].apply_status, "skipped");
+        assert_eq!(
+            pending[0].apply_reason,
+            Some("only create operations can be applied automatically".to_owned())
+        );
+    }
+
+    #[test]
+    fn marks_remote_list_create_name_collision_as_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        store.create_project("Existing").unwrap();
+        let remote_list = List {
+            id: Uuid::new_v4(),
+            name: "Existing".to_owned(),
+            revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: remote_list.id,
+            object_revision: 1,
+            object_type: ObjectType::List,
+            operation_type: OperationType::Create,
+            payload: json!({ "list": remote_list }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        store
+            .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
+            .unwrap();
+        let summary = store.apply_pending_remote_creates().unwrap();
+        assert_eq!(summary.applied, 0);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.conflicts, 1);
+
+        let pending = store.pending_remote_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].apply_status, "conflict");
+        assert_eq!(
+            pending[0].apply_reason,
+            Some("list id or name already exists locally".to_owned())
+        );
     }
 }
