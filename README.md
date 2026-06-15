@@ -144,6 +144,7 @@ TUI controls:
 
 - `j` / `Down`: move down
 - `k` / `Up`: move up
+- `[` / `]`: switch project filter
 - `space`: toggle selected task done/open
 - `a`: add a task
 - `e`: edit selected task title

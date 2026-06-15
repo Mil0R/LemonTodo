@@ -43,9 +43,9 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let help = if area.width < 100 {
-        "a add e edit n note d due t tags / find x archive q quit"
+        "[] project  a add e edit n note d due t tags / find x archive q quit"
     } else {
-        "a add  e edit  n note  d due  t tags  / search  c clear  x archive  space toggle  j/k move  q quit"
+        "[] project  a add  e edit  n note  d due  t tags  / search  c clear  x archive  space toggle  j/k move  q quit"
     };
 
     let search = if app.search_query().is_empty() {
@@ -56,6 +56,11 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
     let title = Paragraph::new(Line::from(vec![
         Span::styled("LemonTodo", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(
+            format!("project: {}", app.current_project_name()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         Span::styled(help, Style::default().add_modifier(Modifier::DIM)),
         Span::styled(search, Style::default().add_modifier(Modifier::ITALIC)),
@@ -71,7 +76,10 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             Style::default().add_modifier(Modifier::DIM),
         )))]
     } else {
-        app.tasks().iter().map(task_item).collect()
+        app.tasks()
+            .iter()
+            .map(|task| task_item(task, app.project_name_for_task(task)))
+            .collect()
     };
 
     let mut state = ListState::default();
@@ -109,7 +117,7 @@ fn input_footer<'a>(title: &'a str, input: &'a str) -> Paragraph<'a> {
     Paragraph::new(input).block(Block::default().title(title).borders(Borders::ALL))
 }
 
-fn task_item(task: &Task) -> ListItem<'_> {
+fn task_item<'a>(task: &'a Task, project_name: &'a str) -> ListItem<'a> {
     let marker = match task.status {
         TaskStatus::Open => "[ ]",
         TaskStatus::Done => "[x]",
@@ -144,6 +152,7 @@ fn task_item(task: &Task) -> ListItem<'_> {
         Span::styled(short_id(&task.id.to_string()).to_owned(), meta_style),
         Span::raw(" "),
         Span::styled(task.title.clone(), task_style),
+        Span::styled(format!(" [{}]", project_name), meta_style),
         Span::styled(due, meta_style),
         Span::styled(tags, meta_style),
     ]))

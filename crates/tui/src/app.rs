@@ -1,16 +1,27 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use lemontodo_core::{NewTask, Task, TaskStatus};
+use lemontodo_core::{List, NewTask, Task, TaskStatus};
 use lemontodo_storage::TodoStore;
 
 pub struct App {
     store: TodoStore,
     tasks: Vec<Task>,
+    projects: Vec<List>,
+    project_names: HashMap<uuid::Uuid, String>,
+    current_project: ProjectSelection,
     selected: usize,
     input: String,
     mode: Mode,
     message: String,
     search_query: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectSelection {
+    All,
+    Project(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +40,9 @@ impl App {
         let mut app = Self {
             store,
             tasks: Vec::new(),
+            projects: Vec::new(),
+            project_names: HashMap::new(),
+            current_project: ProjectSelection::All,
             selected: 0,
             input: String::new(),
             mode: Mode::Browse,
@@ -41,6 +55,24 @@ impl App {
 
     pub fn tasks(&self) -> &[Task] {
         &self.tasks
+    }
+
+    pub fn project_name_for_task(&self, task: &Task) -> &str {
+        self.project_names
+            .get(&task.list_id)
+            .map(String::as_str)
+            .unwrap_or("Unknown")
+    }
+
+    pub fn current_project_name(&self) -> &str {
+        match self.current_project {
+            ProjectSelection::All => "All",
+            ProjectSelection::Project(index) => self
+                .projects
+                .get(index)
+                .map(|project| project.name.as_str())
+                .unwrap_or("All"),
+        }
     }
 
     pub fn selected(&self) -> usize {
@@ -64,8 +96,21 @@ impl App {
     }
 
     pub fn refresh(&mut self) -> Result<()> {
+        self.projects = self.store.projects()?;
+        self.project_names = self
+            .projects
+            .iter()
+            .map(|project| (project.id, project.name.clone()))
+            .collect();
+        self.clamp_project();
+
+        let current_project = self.current_project_name().to_owned();
+        let project_filter = match self.current_project {
+            ProjectSelection::All => None,
+            ProjectSelection::Project(_) => Some(current_project.as_str()),
+        };
         self.tasks = if self.search_query.is_empty() {
-            self.store.list_tasks(true)?
+            self.store.list_tasks_for_project(true, project_filter)?
         } else {
             self.store.search_tasks(&self.search_query)?
         };
@@ -87,6 +132,40 @@ impl App {
         if self.selected + 1 < self.tasks.len() {
             self.selected += 1;
         }
+    }
+
+    pub fn previous_project(&mut self) -> Result<()> {
+        self.current_project = match self.current_project {
+            ProjectSelection::All => {
+                if self.projects.is_empty() {
+                    ProjectSelection::All
+                } else {
+                    ProjectSelection::Project(self.projects.len() - 1)
+                }
+            }
+            ProjectSelection::Project(0) => ProjectSelection::All,
+            ProjectSelection::Project(index) => ProjectSelection::Project(index - 1),
+        };
+        self.message = format!("Project: {}", self.current_project_name());
+        self.refresh()
+    }
+
+    pub fn next_project(&mut self) -> Result<()> {
+        self.current_project = match self.current_project {
+            ProjectSelection::All => {
+                if self.projects.is_empty() {
+                    ProjectSelection::All
+                } else {
+                    ProjectSelection::Project(0)
+                }
+            }
+            ProjectSelection::Project(index) if index + 1 < self.projects.len() => {
+                ProjectSelection::Project(index + 1)
+            }
+            ProjectSelection::Project(_) => ProjectSelection::All,
+        };
+        self.message = format!("Project: {}", self.current_project_name());
+        self.refresh()
     }
 
     pub fn start_add(&mut self) {
@@ -210,7 +289,13 @@ impl App {
             return Ok(());
         }
 
-        let task = self.store.add_task(NewTask::new(title))?;
+        let project_name = match self.current_project {
+            ProjectSelection::All => None,
+            ProjectSelection::Project(_) => Some(self.current_project_name().to_owned()),
+        };
+        let task = self
+            .store
+            .add_task_to_project(NewTask::new(title), project_name.as_deref())?;
         self.message = format!("Added {}", task.title);
         self.input.clear();
         self.mode = Mode::Browse;
@@ -321,6 +406,14 @@ impl App {
             self.selected = 0;
         } else if self.selected >= self.tasks.len() {
             self.selected = self.tasks.len() - 1;
+        }
+    }
+
+    fn clamp_project(&mut self) {
+        if let ProjectSelection::Project(index) = self.current_project
+            && index >= self.projects.len()
+        {
+            self.current_project = ProjectSelection::All;
         }
     }
 }
