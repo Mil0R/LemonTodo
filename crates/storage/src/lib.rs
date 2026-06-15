@@ -11,6 +11,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 const TUI_CURRENT_PROJECT_KEY: &str = "tui.current_project";
+const DEVICE_ID_KEY: &str = "sync.device_id";
+const LAST_SYNC_CURSOR_KEY: &str = "sync.last_cursor";
 
 pub struct TodoStore {
     conn: Connection,
@@ -28,6 +30,8 @@ impl TodoStore {
             .with_context(|| format!("failed to open database {}", path.display()))?;
         let store = Self { conn };
         store.migrate()?;
+        store.ensure_device_id()?;
+        store.backfill_operation_device_ids()?;
         store.ensure_inbox()?;
         Ok(store)
     }
@@ -241,7 +245,7 @@ impl TodoStore {
 
     pub fn pending_operations(&self) -> Result<Vec<Operation>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, object_id, object_revision, object_type, operation_type, payload, created_at, synced_at
+            "SELECT id, device_id, object_id, object_revision, object_type, operation_type, payload, created_at, synced_at
              FROM operations
              WHERE synced_at IS NULL
              ORDER BY created_at ASC",
@@ -249,6 +253,60 @@ impl TodoStore {
         let rows = stmt.query_map([], row_to_operation)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list pending operations")
+    }
+
+    pub fn mark_operations_synced(
+        &self,
+        operation_ids: &[Uuid],
+        cursor: Option<&str>,
+    ) -> Result<usize> {
+        if operation_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let synced_at = Utc::now().to_rfc3339();
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated = 0;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE operations SET synced_at = ?1 WHERE id = ?2 AND synced_at IS NULL",
+            )?;
+            for operation_id in operation_ids {
+                updated += stmt.execute(params![synced_at, operation_id.to_string()])?;
+            }
+        }
+        if let Some(cursor) = cursor {
+            set_sync_state_on_connection(&tx, LAST_SYNC_CURSOR_KEY, cursor)?;
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
+    pub fn mark_pending_operations_synced(&self, cursor: Option<&str>) -> Result<usize> {
+        let operation_ids = self
+            .pending_operations()?
+            .into_iter()
+            .map(|operation| operation.id)
+            .collect::<Vec<_>>();
+        self.mark_operations_synced(&operation_ids, cursor)
+    }
+
+    pub fn operation_ids_by_prefixes(&self, prefixes: &[String]) -> Result<Vec<Uuid>> {
+        prefixes
+            .iter()
+            .map(|prefix| self.find_operation_id_by_prefix(prefix))
+            .collect()
+    }
+
+    pub fn device_id(&self) -> Result<Uuid> {
+        let value = self
+            .get_sync_state(DEVICE_ID_KEY)?
+            .context("device id is missing")?;
+        Uuid::parse_str(&value).context("failed to parse local device id")
+    }
+
+    pub fn last_sync_cursor(&self) -> Result<Option<String>> {
+        self.get_sync_state(LAST_SYNC_CURSOR_KEY)
     }
 
     pub fn save_encrypted_vault_key(&self, encrypted_vault_key: &EncryptedVaultKey) -> Result<()> {
@@ -610,6 +668,7 @@ impl TodoStore {
     ) -> Result<Operation> {
         let operation = Operation {
             id: Uuid::new_v4(),
+            device_id: self.device_id()?,
             object_id,
             object_revision: payload_revision(&payload).unwrap_or(1),
             object_type,
@@ -621,10 +680,11 @@ impl TodoStore {
 
         self.conn.execute(
             "INSERT INTO operations (
-                id, object_id, object_revision, object_type, operation_type, payload, created_at, synced_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                id, device_id, object_id, object_revision, object_type, operation_type, payload, created_at, synced_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 operation.id.to_string(),
+                operation.device_id.to_string(),
                 operation.object_id.to_string(),
                 operation.object_revision,
                 operation.object_type.as_str(),
@@ -694,6 +754,7 @@ impl TodoStore {
 
             CREATE TABLE IF NOT EXISTS operations (
                 id TEXT PRIMARY KEY,
+                device_id TEXT,
                 object_id TEXT NOT NULL,
                 object_revision INTEGER NOT NULL DEFAULT 1,
                 object_type TEXT NOT NULL,
@@ -725,11 +786,31 @@ impl TodoStore {
             "revision",
             "INTEGER NOT NULL DEFAULT 1",
         )?;
+        add_column_if_missing(&self.conn, "operations", "device_id", "TEXT")?;
         add_column_if_missing(
             &self.conn,
             "operations",
             "object_revision",
             "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        Ok(())
+    }
+
+    fn ensure_device_id(&self) -> Result<Uuid> {
+        if let Some(value) = self.get_sync_state(DEVICE_ID_KEY)? {
+            return Uuid::parse_str(&value).context("failed to parse local device id");
+        }
+
+        let device_id = Uuid::new_v4();
+        self.set_sync_state(DEVICE_ID_KEY, &device_id.to_string())?;
+        Ok(device_id)
+    }
+
+    fn backfill_operation_device_ids(&self) -> Result<()> {
+        let device_id = self.device_id()?;
+        self.conn.execute(
+            "UPDATE operations SET device_id = ?1 WHERE device_id IS NULL OR device_id = ''",
+            params![device_id.to_string()],
         )?;
         Ok(())
     }
@@ -818,6 +899,29 @@ impl TodoStore {
             .optional()?
             .with_context(|| format!("no task matches id {id}"))
     }
+
+    fn find_operation_id_by_prefix(&self, id_prefix: &str) -> Result<Uuid> {
+        let prefix = id_prefix.trim();
+        if prefix.is_empty() {
+            bail!("operation id prefix cannot be empty");
+        }
+
+        let like_pattern = format!("{prefix}%");
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM operations WHERE id LIKE ?1")?;
+        let matches = stmt
+            .query_map(params![like_pattern], |row| {
+                parse_uuid(row.get::<_, String>(0)?)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        match matches.len() {
+            0 => bail!("no operation matches id prefix {prefix}"),
+            1 => Ok(matches.into_iter().next().expect("checked length")),
+            _ => bail!("multiple operations match id prefix {prefix}"),
+        }
+    }
 }
 
 fn row_to_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<List> {
@@ -831,15 +935,16 @@ fn row_to_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<List> {
 }
 
 fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
-    let object_type = row.get::<_, String>(3)?;
-    let operation_type = row.get::<_, String>(4)?;
-    let payload = row.get::<_, String>(5)?;
-    let synced_at = row.get::<_, Option<String>>(7)?;
+    let object_type = row.get::<_, String>(4)?;
+    let operation_type = row.get::<_, String>(5)?;
+    let payload = row.get::<_, String>(6)?;
+    let synced_at = row.get::<_, Option<String>>(8)?;
 
     Ok(Operation {
         id: parse_uuid(row.get::<_, String>(0)?)?,
-        object_id: parse_uuid(row.get::<_, String>(1)?)?,
-        object_revision: row.get(2)?,
+        device_id: parse_uuid(row.get::<_, String>(1)?)?,
+        object_id: parse_uuid(row.get::<_, String>(2)?)?,
+        object_revision: row.get(3)?,
         object_type: ObjectType::try_from(object_type.as_str()).map_err(|error| {
             to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })?,
@@ -847,7 +952,7 @@ fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
             to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })?,
         payload: serde_json::from_str(&payload).map_err(to_sql_error)?,
-        created_at: parse_datetime(row.get::<_, String>(6)?)?,
+        created_at: parse_datetime(row.get::<_, String>(7)?)?,
         synced_at: synced_at.map(parse_datetime).transpose()?,
     })
 }
@@ -914,6 +1019,18 @@ fn payload_revision(payload: &serde_json::Value) -> Option<i64> {
         .or_else(|| payload.get("list"))
         .and_then(|object| object.get("revision"))
         .and_then(serde_json::Value::as_i64)
+}
+
+fn set_sync_state_on_connection(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO sync_state (key, value, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at",
+        params![key, value, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 fn normalize_tags(tags: Vec<String>) -> Vec<String> {
@@ -1109,6 +1226,57 @@ mod tests {
         assert_eq!(
             reopened.tui_current_project().unwrap(),
             Some("LemonTodo".to_owned())
+        );
+    }
+
+    #[test]
+    fn tracks_sync_device_and_acknowledges_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lemontodo.db");
+        let store = TodoStore::open(&db_path).unwrap();
+        let device_id = store.device_id().unwrap();
+
+        let task = store.add_task(NewTask::new("Sync me")).unwrap();
+        let updated = store
+            .update_task_title_by_id(task.id, "Synced title")
+            .unwrap();
+        assert_eq!(updated.revision, 2);
+
+        let operations = store.pending_operations().unwrap();
+        assert_eq!(operations.len(), 2);
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation.device_id == device_id)
+        );
+        assert_eq!(operations[0].object_revision, 1);
+        assert_eq!(operations[1].object_revision, 2);
+
+        let acknowledged = store
+            .mark_operations_synced(&[operations[0].id], Some("server-cursor-1"))
+            .unwrap();
+        assert_eq!(acknowledged, 1);
+        assert_eq!(
+            store.last_sync_cursor().unwrap(),
+            Some("server-cursor-1".to_owned())
+        );
+        assert_eq!(store.pending_operations().unwrap().len(), 1);
+
+        let acknowledged = store
+            .mark_pending_operations_synced(Some("server-cursor-2"))
+            .unwrap();
+        assert_eq!(acknowledged, 1);
+        assert!(store.pending_operations().unwrap().is_empty());
+        assert_eq!(
+            store.last_sync_cursor().unwrap(),
+            Some("server-cursor-2".to_owned())
+        );
+
+        let reopened = TodoStore::open(db_path).unwrap();
+        assert_eq!(reopened.device_id().unwrap(), device_id);
+        assert_eq!(
+            reopened.last_sync_cursor().unwrap(),
+            Some("server-cursor-2".to_owned())
         );
     }
 }

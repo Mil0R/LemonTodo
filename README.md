@@ -213,6 +213,12 @@ Create an encrypted sync pack:
 ltd sync pack --out ./sync-pack.json
 ```
 
+Inspect local sync state:
+
+```bash
+ltd sync status
+```
+
 These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:
@@ -231,10 +237,16 @@ ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 
 This is a local E2EE dry-run for the future sync protocol. It does not implement account login, upload, pull, or conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
+After a successful local or scripted upload simulation, mark uploaded operations as synced:
+
+```bash
+ltd sync ack --all-pending --cursor <server-cursor>
+ltd sync ack <operation-id-prefix> --cursor <server-cursor>
+```
 
 ## Current Limitations
 
 - No remote sync yet.
 - No server yet.
 - OS keyring support is not implemented yet.
-- `ltd ops` only inspects the local pending operation log for future sync work; it does not mark operations as synced.
+- `ltd ops` only inspects the local pending operation log; `ltd sync ack` is a local dry-run helper, not a real server acknowledgement.

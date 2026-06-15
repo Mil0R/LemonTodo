@@ -117,6 +117,8 @@ enum ProjectCommand {
 
 #[derive(Debug, Subcommand)]
 enum SyncCommand {
+    /// Show local sync state.
+    Status,
     /// Generate a random local vault key as hex.
     Keygen,
     /// Pack pending operations into encrypted sync objects.
@@ -128,6 +130,17 @@ enum SyncCommand {
         master_password: Option<String>,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+    },
+    /// Mark local pending operations as synced after a successful upload.
+    Ack {
+        /// Server cursor returned by a future sync endpoint.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Mark every currently pending operation as synced.
+        #[arg(long)]
+        all_pending: bool,
+        /// Operation id prefixes to mark as synced.
+        operations: Vec<String>,
     },
 }
 
@@ -282,6 +295,15 @@ fn main() -> Result<()> {
             }
         }
         Some(Command::Sync { command }) => match command {
+            SyncCommand::Status => {
+                let pending = store.pending_operations()?.len();
+                let cursor = store
+                    .last_sync_cursor()?
+                    .unwrap_or_else(|| "<none>".to_owned());
+                println!("Device {}", store.device_id()?);
+                println!("Last cursor {cursor}");
+                println!("Pending operations {pending}");
+            }
             SyncCommand::Keygen => {
                 println!("{}", VaultKey::generate().to_hex());
             }
@@ -292,7 +314,7 @@ fn main() -> Result<()> {
             } => {
                 let vault_key = load_vault_key(&store, key.as_deref(), master_password)?;
                 let operations = store.pending_operations()?;
-                let pack = pack_operations(&vault_key, &operations)?;
+                let pack = pack_operations(&vault_key, store.device_id()?, &operations)?;
                 let json = serde_json::to_string_pretty(&pack)?;
                 if let Some(path) = out {
                     fs::write(&path, json)
@@ -305,6 +327,26 @@ fn main() -> Result<()> {
                 } else {
                     println!("{json}");
                 }
+            }
+            SyncCommand::Ack {
+                cursor,
+                all_pending,
+                operations,
+            } => {
+                if all_pending && !operations.is_empty() {
+                    anyhow::bail!("use either --all-pending or operation ids, not both");
+                }
+                if !all_pending && operations.is_empty() {
+                    anyhow::bail!("provide operation ids or use --all-pending");
+                }
+
+                let updated = if all_pending {
+                    store.mark_pending_operations_synced(cursor.as_deref())?
+                } else {
+                    let operation_ids = store.operation_ids_by_prefixes(&operations)?;
+                    store.mark_operations_synced(&operation_ids, cursor.as_deref())?
+                };
+                println!("Marked {updated} operation(s) as synced");
             }
         },
         Some(Command::Vault { command }) => match command {

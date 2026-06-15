@@ -82,6 +82,7 @@ pub struct TodoSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Operation {
     pub id: Uuid,
+    pub device_id: Uuid,
     pub object_id: Uuid,
     pub object_revision: i64,
     pub object_type: ObjectType,
