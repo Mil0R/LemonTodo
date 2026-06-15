@@ -19,3 +19,4 @@ dirs.workspace = true
 lemontodo-core = { path = "../core" }
 lemontodo-storage = { path = "../storage" }
 ratatui.workspace = true
+uuid.workspace = true

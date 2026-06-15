@@ -71,29 +71,59 @@ impl TodoStore {
     }
 
     pub fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
-        let sql = if include_done {
-            "SELECT id, list_id, title, note_markdown, status, tags, due_date,
-                    sort_key, created_at, updated_at, deleted_at
-             FROM tasks
-             WHERE deleted_at IS NULL AND status != 'archived'
-             ORDER BY status = 'done', sort_key ASC"
-        } else {
-            "SELECT id, list_id, title, note_markdown, status, tags, due_date,
-                    sort_key, created_at, updated_at, deleted_at
-             FROM tasks
-             WHERE deleted_at IS NULL AND status = 'open'
-             ORDER BY sort_key ASC"
-        };
+        let sql = format!(
+            "{} WHERE {} ORDER BY status = 'done', sort_key ASC",
+            select_task_sql(),
+            if include_done {
+                "deleted_at IS NULL AND status != 'archived'"
+            } else {
+                "deleted_at IS NULL AND status = 'open'"
+            }
+        );
 
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], row_to_task)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list tasks")
     }
 
+    pub fn search_tasks(&self, query: &str) -> Result<Vec<Task>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return self.list_tasks(true);
+        }
+
+        let pattern = format!("%{}%", query.to_lowercase());
+        let sql = format!(
+            "{} WHERE deleted_at IS NULL
+                AND status != 'archived'
+                AND (
+                    lower(title) LIKE ?1
+                    OR lower(note_markdown) LIKE ?1
+                    OR lower(tags) LIKE ?1
+                )
+             ORDER BY status = 'done', sort_key ASC",
+            select_task_sql()
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![pattern], row_to_task)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to search tasks")
+    }
+
     pub fn mark_done(&self, id_prefix: &str) -> Result<Task> {
         let task = self.find_task_by_prefix(id_prefix)?;
         self.set_task_status(task, TaskStatus::Done)
+    }
+
+    pub fn archive_task(&self, id_prefix: &str) -> Result<Task> {
+        let task = self.find_task_by_prefix(id_prefix)?;
+        self.set_task_status(task, TaskStatus::Archived)
+    }
+
+    pub fn archive_task_by_id(&self, id: Uuid) -> Result<Task> {
+        let task = self.find_task_by_id(id)?;
+        self.set_task_status(task, TaskStatus::Archived)
     }
 
     pub fn toggle_done(&self, id: Uuid) -> Result<Task> {
@@ -103,6 +133,31 @@ impl TodoStore {
             TaskStatus::Done | TaskStatus::Archived => TaskStatus::Open,
         };
         self.set_task_status(task, status)
+    }
+
+    pub fn update_task_title(&self, id_prefix: &str, title: &str) -> Result<Task> {
+        let task = self.find_task_by_prefix(id_prefix)?;
+        self.update_task_title_by_id(task.id, title)
+    }
+
+    pub fn update_task_title_by_id(&self, id: Uuid, title: &str) -> Result<Task> {
+        let title = title.trim();
+        if title.is_empty() {
+            bail!("task title cannot be empty");
+        }
+
+        let task = self.find_task_by_id(id)?;
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE tasks SET title = ?1, updated_at = ?2 WHERE id = ?3",
+            params![title, now.to_rfc3339(), task.id.to_string()],
+        )?;
+
+        Ok(Task {
+            title: title.to_owned(),
+            updated_at: now,
+            ..task
+        })
     }
 
     fn set_task_status(&self, task: Task, status: TaskStatus) -> Result<Task> {
@@ -209,12 +264,12 @@ impl TodoStore {
         }
 
         let like_pattern = format!("{prefix}%");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, list_id, title, note_markdown, status, tags, due_date,
-                    sort_key, created_at, updated_at, deleted_at
+        let mut stmt = self.conn.prepare(&format!(
+            "{}
              FROM tasks
              WHERE id LIKE ?1 AND deleted_at IS NULL",
-        )?;
+            select_task_columns()
+        ))?;
 
         let matches = stmt
             .query_map(params![like_pattern], row_to_task)?
@@ -230,16 +285,29 @@ impl TodoStore {
     fn find_task_by_id(&self, id: Uuid) -> Result<Task> {
         self.conn
             .query_row(
-                "SELECT id, list_id, title, note_markdown, status, tags, due_date,
-                        sort_key, created_at, updated_at, deleted_at
+                &format!(
+                    "{}
                  FROM tasks
                  WHERE id = ?1 AND deleted_at IS NULL",
+                    select_task_columns()
+                ),
                 params![id.to_string()],
                 row_to_task,
             )
             .optional()?
             .with_context(|| format!("no task matches id {id}"))
     }
+}
+
+fn select_task_sql() -> &'static str {
+    "SELECT id, list_id, title, note_markdown, status, tags, due_date,
+            sort_key, created_at, updated_at, deleted_at
+     FROM tasks"
+}
+
+fn select_task_columns() -> &'static str {
+    "SELECT id, list_id, title, note_markdown, status, tags, due_date,
+            sort_key, created_at, updated_at, deleted_at"
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -317,5 +385,15 @@ mod tests {
         let reopened = store.toggle_done(task.id).unwrap();
         assert_eq!(reopened.status, TaskStatus::Open);
         assert_eq!(store.list_tasks(false).unwrap().len(), 1);
+
+        let edited = store
+            .update_task_title_by_id(task.id, "Ship edited MVP")
+            .unwrap();
+        assert_eq!(edited.title, "Ship edited MVP");
+        assert_eq!(store.search_tasks("edited").unwrap().len(), 1);
+
+        let archived = store.archive_task_by_id(task.id).unwrap();
+        assert_eq!(archived.status, TaskStatus::Archived);
+        assert!(store.list_tasks(true).unwrap().is_empty());
     }
 }

@@ -31,7 +31,10 @@ The current `dev` branch contains the first local-only CLI/TUI foundation. The i
 cargo run -p lemontodo-tui -- init
 cargo run -p lemontodo-tui -- add "Ship local MVP" --tag mvp --due 2026-06-30
 cargo run -p lemontodo-tui -- list --all
+cargo run -p lemontodo-tui -- search "mvp"
+cargo run -p lemontodo-tui -- edit <task-id-prefix> "Ship edited MVP"
 cargo run -p lemontodo-tui -- done <task-id-prefix>
+cargo run -p lemontodo-tui -- archive <task-id-prefix>
 ```
 
 This is not the final interactive TUI yet. It establishes the Rust workspace, core task model, SQLite persistence, and command surface that the TUI will build on.
@@ -48,7 +51,11 @@ Initial TUI controls:
 - `k` / `Up`: move up
 - `space`: toggle selected task done/open
 - `a`: add a task
+- `e`: edit selected task title
+- `/`: search tasks
+- `c`: clear search
+- `x`: archive selected task
 - `Enter`: submit task while adding
-- `Esc`: cancel add mode or quit from browse mode
+- `Esc`: cancel input mode or quit from browse mode
 - `r`: refresh
 - `q`: quit

@@ -1,3 +1,6 @@
+mod app;
+mod ui;
+
 use std::{io, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
@@ -10,13 +13,11 @@ use crossterm::{
 };
 use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_storage::TodoStore;
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+use ratatui::{Terminal, backend::CrosstermBackend};
+
+use crate::{
+    app::{App, Mode},
+    ui::draw,
 };
 
 #[derive(Debug, Parser)]
@@ -49,98 +50,14 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Search tasks locally.
+    Search { query: String },
     /// Mark a task done by id prefix.
     Done { id: String },
-}
-
-struct App {
-    store: TodoStore,
-    tasks: Vec<Task>,
-    selected: usize,
-    input: String,
-    mode: Mode,
-    message: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Browse,
-    Add,
-}
-
-impl App {
-    fn new(store: TodoStore) -> Result<Self> {
-        let mut app = Self {
-            store,
-            tasks: Vec::new(),
-            selected: 0,
-            input: String::new(),
-            mode: Mode::Browse,
-            message: String::new(),
-        };
-        app.refresh()?;
-        Ok(app)
-    }
-
-    fn refresh(&mut self) -> Result<()> {
-        self.tasks = self.store.list_tasks(true)?;
-        if self.tasks.is_empty() {
-            self.selected = 0;
-        } else if self.selected >= self.tasks.len() {
-            self.selected = self.tasks.len() - 1;
-        }
-        Ok(())
-    }
-
-    fn selected_task(&self) -> Option<&Task> {
-        self.tasks.get(self.selected)
-    }
-
-    fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-        }
-    }
-
-    fn move_down(&mut self) {
-        if self.selected + 1 < self.tasks.len() {
-            self.selected += 1;
-        }
-    }
-
-    fn toggle_selected(&mut self) -> Result<()> {
-        let Some(task) = self.selected_task() else {
-            self.message = "No task selected".to_owned();
-            return Ok(());
-        };
-
-        let updated = self.store.toggle_done(task.id)?;
-        self.message = match updated.status {
-            TaskStatus::Done => format!("Completed {}", updated.title),
-            TaskStatus::Open => format!("Reopened {}", updated.title),
-            TaskStatus::Archived => format!("Updated {}", updated.title),
-        };
-        self.refresh()
-    }
-
-    fn submit_input(&mut self) -> Result<()> {
-        let title = self.input.trim();
-        if title.is_empty() {
-            self.message = "Task title cannot be empty".to_owned();
-        } else {
-            let task = self.store.add_task(NewTask::new(title))?;
-            self.message = format!("Added {}", task.title);
-            self.input.clear();
-            self.mode = Mode::Browse;
-            self.refresh()?;
-            self.selected = self
-                .tasks
-                .iter()
-                .position(|existing| existing.id == task.id)
-                .unwrap_or(self.selected);
-        }
-        Ok(())
-    }
+    /// Edit a task title by id prefix.
+    Edit { id: String, title: String },
+    /// Archive a task by id prefix.
+    Archive { id: String },
 }
 
 fn main() -> Result<()> {
@@ -169,6 +86,9 @@ fn main() -> Result<()> {
         Some(Command::List { all }) => {
             print_tasks(store.list_tasks(all)?)?;
         }
+        Some(Command::Search { query }) => {
+            print_tasks(store.search_tasks(&query)?)?;
+        }
         Some(Command::Done { id }) => {
             let task = store.mark_done(&id)?;
             println!(
@@ -176,6 +96,14 @@ fn main() -> Result<()> {
                 short_id(&task.id.to_string()),
                 task.title
             );
+        }
+        Some(Command::Edit { id, title }) => {
+            let task = store.update_task_title(&id, &title)?;
+            println!("Updated {} {}", short_id(&task.id.to_string()), task.title);
+        }
+        Some(Command::Archive { id }) => {
+            let task = store.archive_task(&id)?;
+            println!("Archived {} {}", short_id(&task.id.to_string()), task.title);
         }
         None => run_tui(store)?,
     }
@@ -219,184 +147,32 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 }
 
 fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
-    match app.mode {
+    match app.mode() {
         Mode::Browse => match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => app.move_down(),
             KeyCode::Char('k') | KeyCode::Up => app.move_up(),
             KeyCode::Char(' ') => app.toggle_selected()?,
-            KeyCode::Char('a') => {
-                app.mode = Mode::Add;
-                app.input.clear();
-                app.message = "Add task".to_owned();
-            }
+            KeyCode::Char('a') => app.start_add(),
+            KeyCode::Char('e') => app.start_edit(),
+            KeyCode::Char('/') => app.start_search(),
+            KeyCode::Char('c') => app.clear_search()?,
+            KeyCode::Char('x') => app.archive_selected()?,
             KeyCode::Char('r') => {
                 app.refresh()?;
-                app.message = "Refreshed".to_owned();
             }
             _ => {}
         },
-        Mode::Add => match key.code {
-            KeyCode::Esc => {
-                app.mode = Mode::Browse;
-                app.input.clear();
-                app.message = "Cancelled".to_owned();
-            }
+        Mode::Add | Mode::Edit | Mode::Search => match key.code {
+            KeyCode::Esc => app.cancel_input(),
             KeyCode::Enter => app.submit_input()?,
-            KeyCode::Backspace => {
-                app.input.pop();
-            }
-            KeyCode::Char(value) => app.input.push(value),
+            KeyCode::Backspace => app.pop_input(),
+            KeyCode::Char(value) => app.push_input(value),
             _ => {}
         },
     }
 
     Ok(false)
-}
-
-fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
-    let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(3),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "LemonTodo",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            "a add  space toggle  j/k move  r refresh  q quit",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]))
-    .block(Block::default().borders(Borders::ALL));
-    frame.render_widget(title, chunks[0]);
-
-    let items = if app.tasks.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
-            "No tasks. Press 'a' to add one.",
-            Style::default().fg(Color::DarkGray),
-        )))]
-    } else {
-        app.tasks
-            .iter()
-            .map(|task| {
-                let marker = match task.status {
-                    TaskStatus::Open => "[ ]",
-                    TaskStatus::Done => "[x]",
-                    TaskStatus::Archived => "[-]",
-                };
-                let due = task
-                    .due_date
-                    .map(|date| format!(" due:{date}"))
-                    .unwrap_or_default();
-                let tags = if task.tags.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        " {}",
-                        task.tags
-                            .iter()
-                            .map(|tag| format!("#{tag}"))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
-                };
-
-                let style = match task.status {
-                    TaskStatus::Open => Style::default().fg(Color::White),
-                    TaskStatus::Done => Style::default().fg(Color::DarkGray),
-                    TaskStatus::Archived => Style::default().fg(Color::DarkGray),
-                };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(marker, style),
-                    Span::raw(" "),
-                    Span::styled(
-                        short_id(&task.id.to_string()).to_owned(),
-                        style.fg(Color::Cyan),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(task.title.clone(), style),
-                    Span::styled(due, Style::default().fg(Color::Magenta)),
-                    Span::styled(tags, Style::default().fg(Color::Green)),
-                ]))
-            })
-            .collect()
-    };
-
-    let mut state = ListState::default();
-    if !app.tasks.is_empty() {
-        state.select(Some(app.selected));
-    }
-    let list = List::new(items)
-        .block(Block::default().title("Tasks").borders(Borders::ALL))
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    frame.render_stateful_widget(list, chunks[1], &mut state);
-
-    let footer = match app.mode {
-        Mode::Browse => Paragraph::new(app.message.as_str())
-            .block(Block::default().borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
-        Mode::Add => Paragraph::new(app.input.as_str())
-            .block(Block::default().title("New task").borders(Borders::ALL))
-            .style(Style::default().fg(Color::Yellow)),
-    };
-    frame.render_widget(footer, chunks[2]);
-
-    if app.mode == Mode::Add {
-        let input_width = app.input.chars().count() as u16;
-        frame.set_cursor_position((chunks[2].x + input_width + 1, chunks[2].y + 1));
-    }
-
-    if area.width < 60 || area.height < 12 {
-        let popup = centered_rect(80, 40, area);
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new("Terminal is too small")
-                .alignment(Alignment::Center)
-                .block(Block::default().borders(Borders::ALL)),
-            popup,
-        );
-    }
-}
-
-fn centered_rect(
-    percent_x: u16,
-    percent_y: u16,
-    area: ratatui::layout::Rect,
-) -> ratatui::layout::Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }
 
 fn print_tasks(tasks: Vec<Task>) -> Result<()> {
