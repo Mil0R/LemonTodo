@@ -166,6 +166,15 @@ enum SyncCommand {
         /// Print decrypted operations as pretty JSON.
         #[arg(long)]
         json: bool,
+        /// Do not save pulled operations to the local pending-apply inbox.
+        #[arg(long)]
+        no_save: bool,
+    },
+    /// Inspect decrypted remote operations waiting for apply.
+    Inbox {
+        /// Print pending remote operations as pretty JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Mark local pending operations as synced after a successful upload.
     Ack {
@@ -350,6 +359,10 @@ fn main() -> Result<()> {
                 println!("Server {server}");
                 println!("Last cursor {cursor}");
                 println!("Pending operations {pending}");
+                println!(
+                    "Pending remote operations {}",
+                    store.pending_remote_operation_count()?
+                );
             }
             SyncCommand::Keygen => {
                 println!("{}", VaultKey::generate().to_hex());
@@ -397,6 +410,7 @@ fn main() -> Result<()> {
                 server_url,
                 limit,
                 json,
+                no_save,
             } => {
                 let pulled = pull_remote_operations(
                     &store,
@@ -405,12 +419,18 @@ fn main() -> Result<()> {
                     server_url.as_deref(),
                     limit,
                 )?;
+                let saved = if no_save {
+                    0
+                } else {
+                    store.save_remote_operations(&pulled.operations, &pulled.cursor)?
+                };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&pulled.operations)?);
                 } else {
                     println!(
-                        "Pulled {} object(s), cursor {}, has_more {}",
+                        "Pulled {} object(s), saved {}, cursor {}, has_more {}",
                         pulled.operations.len(),
+                        saved,
                         pulled.cursor,
                         pulled.has_more
                     );
@@ -422,6 +442,31 @@ fn main() -> Result<()> {
                             operation.operation_type.as_str(),
                             operation.object_revision,
                             operation.object_id
+                        );
+                    }
+                }
+            }
+            SyncCommand::Inbox { json } => {
+                let pending = store.pending_remote_operations()?;
+                if json {
+                    let operations = pending
+                        .iter()
+                        .map(|remote| &remote.operation)
+                        .collect::<Vec<_>>();
+                    println!("{}", serde_json::to_string_pretty(&operations)?);
+                } else if pending.is_empty() {
+                    println!("No pending remote operations");
+                } else {
+                    for remote in pending {
+                        let operation = remote.operation;
+                        println!(
+                            "{} {} {} rev:{} {} cursor:{}",
+                            short_id(&operation.id.to_string()),
+                            operation.object_type.as_str(),
+                            operation.operation_type.as_str(),
+                            operation.object_revision,
+                            operation.object_id,
+                            remote.server_cursor
                         );
                     }
                 }

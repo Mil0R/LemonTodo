@@ -19,6 +19,15 @@ pub struct TodoStore {
     conn: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteOperation {
+    pub id: Uuid,
+    pub operation: Operation,
+    pub server_cursor: String,
+    pub pulled_at: DateTime<Utc>,
+    pub applied_at: Option<DateTime<Utc>>,
+}
+
 impl TodoStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -316,6 +325,66 @@ impl TodoStore {
 
     pub fn sync_server_url(&self) -> Result<Option<String>> {
         self.get_sync_state(SYNC_SERVER_URL_KEY)
+    }
+
+    pub fn save_remote_operations(
+        &self,
+        operations: &[Operation],
+        server_cursor: &str,
+    ) -> Result<usize> {
+        if operations.is_empty() {
+            return Ok(0);
+        }
+
+        let pulled_at = Utc::now().to_rfc3339();
+        let tx = self.conn.unchecked_transaction()?;
+        let mut inserted = 0;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO remote_operations (
+                    id, operation_id, device_id, object_id, object_revision,
+                    object_type, operation_type, operation_json, server_cursor, pulled_at, applied_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+            )?;
+            for operation in operations {
+                inserted += stmt.execute(params![
+                    Uuid::new_v4().to_string(),
+                    operation.id.to_string(),
+                    operation.device_id.to_string(),
+                    operation.object_id.to_string(),
+                    operation.object_revision,
+                    operation.object_type.as_str(),
+                    operation.operation_type.as_str(),
+                    serde_json::to_string(operation)?,
+                    server_cursor,
+                    pulled_at,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn pending_remote_operations(&self) -> Result<Vec<RemoteOperation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, operation_json, server_cursor, pulled_at, applied_at
+             FROM remote_operations
+             WHERE applied_at IS NULL
+             ORDER BY pulled_at ASC, operation_id ASC",
+        )?;
+        let rows = stmt.query_map([], row_to_remote_operation)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list pending remote operations")
+    }
+
+    pub fn pending_remote_operation_count(&self) -> Result<usize> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM remote_operations WHERE applied_at IS NULL",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .context("failed to count pending remote operations")
     }
 
     pub fn save_encrypted_vault_key(&self, encrypted_vault_key: &EncryptedVaultKey) -> Result<()> {
@@ -776,6 +845,23 @@ impl TodoStore {
             CREATE INDEX IF NOT EXISTS idx_operations_synced
                 ON operations(synced_at, created_at);
 
+            CREATE TABLE IF NOT EXISTS remote_operations (
+                id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL UNIQUE,
+                device_id TEXT NOT NULL,
+                object_id TEXT NOT NULL,
+                object_revision INTEGER NOT NULL,
+                object_type TEXT NOT NULL,
+                operation_type TEXT NOT NULL,
+                operation_json TEXT NOT NULL,
+                server_cursor TEXT NOT NULL,
+                pulled_at TEXT NOT NULL,
+                applied_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_remote_operations_pending
+                ON remote_operations(applied_at, pulled_at);
+
             CREATE TABLE IF NOT EXISTS sync_state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
@@ -963,6 +1049,18 @@ fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
         payload: serde_json::from_str(&payload).map_err(to_sql_error)?,
         created_at: parse_datetime(row.get::<_, String>(7)?)?,
         synced_at: synced_at.map(parse_datetime).transpose()?,
+    })
+}
+
+fn row_to_remote_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteOperation> {
+    let operation_json = row.get::<_, String>(1)?;
+    let applied_at = row.get::<_, Option<String>>(4)?;
+    Ok(RemoteOperation {
+        id: parse_uuid(row.get::<_, String>(0)?)?,
+        operation: serde_json::from_str(&operation_json).map_err(to_sql_error)?,
+        server_cursor: row.get(2)?,
+        pulled_at: parse_datetime(row.get::<_, String>(3)?)?,
+        applied_at: applied_at.map(parse_datetime).transpose()?,
     })
 }
 
@@ -1320,5 +1418,42 @@ mod tests {
             reopened.sync_server_url().unwrap(),
             Some("http://localhost:8787".to_owned())
         );
+    }
+
+    #[test]
+    fn stores_remote_operations_for_later_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: Uuid::new_v4(),
+            object_revision: 1,
+            object_type: ObjectType::Task,
+            operation_type: OperationType::Create,
+            payload: json!({ "title": "Remote task" }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        assert_eq!(store.pending_remote_operation_count().unwrap(), 0);
+        assert_eq!(
+            store
+                .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
+                .unwrap(),
+            0
+        );
+
+        let pending = store.pending_remote_operations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation.id, operation.id);
+        assert_eq!(pending[0].server_cursor, "cursor-1");
+        assert_eq!(store.pending_remote_operation_count().unwrap(), 1);
     }
 }
