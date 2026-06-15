@@ -86,6 +86,10 @@ impl App {
         }
     }
 
+    pub fn shows_all_projects(&self) -> bool {
+        self.current_project == ProjectSelection::All
+    }
+
     pub fn selected(&self) -> usize {
         self.selected
     }

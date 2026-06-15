@@ -86,7 +86,14 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     } else {
         app.tasks()
             .iter()
-            .map(|task| task_item(task, app.project_name_for_task(task), app.view_mode()))
+            .map(|task| {
+                task_item(
+                    task,
+                    app.project_name_for_task(task),
+                    app.view_mode(),
+                    app.shows_all_projects(),
+                )
+            })
             .collect()
     };
 
@@ -182,7 +189,12 @@ fn input_footer<'a>(title: &'a str, input: &'a str) -> Paragraph<'a> {
     Paragraph::new(input).block(Block::default().title(title).borders(Borders::ALL))
 }
 
-fn task_item<'a>(task: &'a Task, project_name: &'a str, view_mode: ViewMode) -> ListItem<'a> {
+fn task_item<'a>(
+    task: &'a Task,
+    project_name: &'a str,
+    view_mode: ViewMode,
+    show_project: bool,
+) -> ListItem<'a> {
     let marker = match task.status {
         TaskStatus::Open => "[ ]",
         TaskStatus::Done => "[x]",
@@ -211,11 +223,16 @@ fn task_item<'a>(task: &'a Task, project_name: &'a str, view_mode: ViewMode) -> 
     };
     let meta_style = Style::default().add_modifier(Modifier::DIM);
 
+    let project = if show_project {
+        format!(" [{project_name}]")
+    } else {
+        String::new()
+    };
     let title = Line::from(vec![
         Span::styled(marker, task_style),
         Span::raw(" "),
         Span::styled(task.title.clone(), task_style),
-        Span::styled(format!(" [{}]", project_name), meta_style),
+        Span::styled(project, meta_style),
         Span::styled(due, meta_style),
         Span::styled(tags, meta_style),
     ]);
@@ -227,9 +244,7 @@ fn task_item<'a>(task: &'a Task, project_name: &'a str, view_mode: ViewMode) -> 
             Line::from(vec![
                 Span::raw("    "),
                 Span::styled(format!("id: {}", task.id), meta_style),
-                Span::raw("  "),
-                Span::styled(format!("project: {project_name}"), meta_style),
-                Span::raw("  "),
+                project_detail(project_name, show_project, meta_style),
                 Span::styled(
                     format!("created: {}", format_time(task.created_at)),
                     meta_style,
@@ -265,6 +280,14 @@ fn task_item<'a>(task: &'a Task, project_name: &'a str, view_mode: ViewMode) -> 
                 ),
             ]),
         ]),
+    }
+}
+
+fn project_detail<'a>(project_name: &'a str, show_project: bool, meta_style: Style) -> Span<'a> {
+    if show_project {
+        Span::styled(format!("  project: {project_name}  "), meta_style)
+    } else {
+        Span::raw("  ")
     }
 }
 
