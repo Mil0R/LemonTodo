@@ -25,7 +25,66 @@ The first product surface is a terminal TUI. A React Native mobile app is planne
 
 ## Current Development Slice
 
-The current `dev` branch contains the first local-only CLI/TUI foundation. The installed binary name is `ltd`.
+The current `dev` branch contains the local-only CLI/TUI foundation. The binary name is `ltd`.
+
+This is not the final interactive TUI yet. It establishes the Rust workspace, core task model, SQLite persistence, JSON snapshot import/export, and a local operation log for the future sync layer.
+
+## Requirements
+
+- Rust toolchain with `cargo`
+- Rust `1.95` or newer, matching the workspace `rust-version`
+
+## Build
+
+Build a debug binary:
+
+```bash
+cargo build -p lemontodo-tui
+```
+
+Build a release binary:
+
+```bash
+cargo build --release -p lemontodo-tui
+```
+
+The release binary is created at:
+
+```bash
+target/release/ltd
+```
+
+Run it directly:
+
+```bash
+./target/release/ltd
+```
+
+## Install Locally
+
+Install `ltd` into Cargo's local binary directory:
+
+```bash
+cargo install --path crates/tui
+```
+
+After installation, make sure Cargo's bin directory is on `PATH`. Rust's official installer places Cargo tools under `~/.cargo/bin` on Linux/macOS and `%USERPROFILE%\.cargo\bin` on Windows.
+
+Then run:
+
+```bash
+ltd
+```
+
+## Development Run
+
+Without installing:
+
+```bash
+cargo run -p lemontodo-tui
+```
+
+Run a subcommand during development:
 
 ```bash
 cargo run -p lemontodo-tui -- init
@@ -44,15 +103,33 @@ cargo run -p lemontodo-tui -- done <task-id-prefix>
 cargo run -p lemontodo-tui -- archive <task-id-prefix>
 ```
 
-This is not the final interactive TUI yet. It establishes the Rust workspace, core task model, SQLite persistence, and command surface that the TUI will build on.
+## Usage
 
 Running `ltd` without a subcommand opens the interactive terminal UI:
 
 ```bash
-cargo run -p lemontodo-tui
+ltd
 ```
 
-Initial TUI controls:
+Common CLI commands:
+
+```bash
+ltd add "Fix sync protocol notes" --tag sync --due 2026-06-30
+ltd list --all
+ltd search sync
+ltd edit <task-id-prefix> "Fix encrypted sync protocol notes"
+ltd note <task-id-prefix> "Markdown note"
+ltd due <task-id-prefix> 2026-06-30
+ltd due <task-id-prefix>
+ltd tags <task-id-prefix> sync mvp
+ltd done <task-id-prefix>
+ltd archive <task-id-prefix>
+ltd export ./lemontodo.snapshot.json
+ltd import ./lemontodo.snapshot.json
+ltd ops
+```
+
+TUI controls:
 
 - `j` / `Down`: move down
 - `k` / `Up`: move up
@@ -69,3 +146,42 @@ Initial TUI controls:
 - `Esc`: cancel input mode or quit from browse mode
 - `r`: refresh
 - `q`: quit
+
+## Data Location
+
+By default, `ltd` stores local data in the platform user data directory:
+
+```text
+<data-dir>/lemontodo/lemontodo.db
+```
+
+On most Linux desktops this resolves to:
+
+```text
+~/.local/share/lemontodo/lemontodo.db
+```
+
+Use `--db` to override the database path. This is useful for testing or keeping separate vaults:
+
+```bash
+ltd --db ./scratch.db add "Test task"
+ltd --db ./scratch.db list --all
+```
+
+## Backup And Migration
+
+Use JSON snapshots for local backup and migration:
+
+```bash
+ltd export ./lemontodo.snapshot.json
+ltd import ./lemontodo.snapshot.json
+```
+
+Snapshots are plaintext local interchange files. They are not the final encrypted sync protocol.
+
+## Current Limitations
+
+- No remote sync yet.
+- No end-to-end encryption layer yet.
+- No server yet.
+- `ltd ops` only inspects the local pending operation log for future sync work.
