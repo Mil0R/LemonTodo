@@ -150,6 +150,23 @@ enum SyncCommand {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Connect a new device by logging in, downloading vault metadata, and verifying the master password.
+    Connect {
+        #[arg(long)]
+        email: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        password: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        master_password: Option<String>,
+        /// Override the configured server URL for this device connection.
+        #[arg(long)]
+        server_url: Option<String>,
+        /// Overwrite existing local vault metadata.
+        #[arg(long)]
+        force: bool,
+    },
     /// Revoke the current server session and clear the local access token.
     Logout {
         /// Only clear the local token without calling the server.
@@ -440,6 +457,30 @@ fn main() -> Result<()> {
                 store.save_sync_access_token(&response.access_token)?;
                 println!("Logged in as {}", response.email);
             }
+            SyncCommand::Connect {
+                email,
+                password,
+                master_password,
+                server_url,
+                force,
+            } => {
+                let email = email
+                    .or(store.sync_account_email()?)
+                    .context("sync account email is not configured; pass --email or run ltd sync configure --email <email>")?;
+                let password = password.map(Ok).unwrap_or_else(prompt_account_password)?;
+                let master_password = master_password
+                    .map(Ok)
+                    .unwrap_or_else(|| prompt_master_password("Master password: "))?;
+                let connected = connect_device(
+                    &store,
+                    server_url.as_deref(),
+                    &email,
+                    &password,
+                    &master_password,
+                    force,
+                )?;
+                println!("Connected device for {}", connected.email);
+            }
             SyncCommand::Logout {
                 local_only,
                 server_url,
@@ -478,10 +519,16 @@ fn main() -> Result<()> {
                 } else {
                     "<not configured>"
                 };
+                let vault_metadata = if store.encrypted_vault_key()?.is_some() {
+                    "configured"
+                } else {
+                    "<not initialized>"
+                };
                 println!("Device {}", store.device_id()?);
                 println!("Server {server}");
                 println!("Account {email}");
                 println!("Access token {token}");
+                println!("Vault metadata {vault_metadata}");
                 println!("Last cursor {cursor}");
                 println!("Pending operations {pending}");
                 println!(
@@ -705,6 +752,10 @@ struct PullSummary {
     has_more: bool,
 }
 
+struct DeviceConnectSummary {
+    email: String,
+}
+
 fn push_pending_operations(
     store: &TodoStore,
     key: Option<&str>,
@@ -801,9 +852,7 @@ fn push_vault_metadata(store: &TodoStore) -> Result<()> {
 }
 
 fn pull_vault_metadata(store: &TodoStore, force: bool) -> Result<bool> {
-    if store.encrypted_vault_key()?.is_some() && !force {
-        anyhow::bail!("local vault metadata already exists; use --force to overwrite");
-    }
+    ensure_vault_metadata_write_allowed(store, force)?;
     let server_url = configured_server_url(store, None)?;
     let access_token = configured_access_token(store)?;
     let response = get_vault_metadata_request(&server_url, &access_token)?;
@@ -812,6 +861,33 @@ fn pull_vault_metadata(store: &TodoStore, force: bool) -> Result<bool> {
     };
     store.save_encrypted_vault_key(&encrypted_vault_key)?;
     Ok(true)
+}
+
+fn connect_device(
+    store: &TodoStore,
+    server_url: Option<&str>,
+    email: &str,
+    password: &str,
+    master_password: &str,
+    force: bool,
+) -> Result<DeviceConnectSummary> {
+    let server_url = configured_server_url(store, server_url)?;
+    let login = post_login_request(
+        &server_url,
+        &LoginRequest {
+            email: email.to_owned(),
+            password: password.to_owned(),
+        },
+    )?;
+    let response = get_vault_metadata_request(&server_url, &login.access_token)?;
+    let encrypted_vault_key = response.encrypted_vault_key.context(
+        "server account has no encrypted vault metadata; initialize another device and run ltd sync vault push first",
+    )?;
+    import_remote_vault_metadata(store, &encrypted_vault_key, force, master_password)?;
+    store.save_sync_server_url(&server_url)?;
+    store.save_sync_account_email(&login.email)?;
+    store.save_sync_access_token(&login.access_token)?;
+    Ok(DeviceConnectSummary { email: login.email })
 }
 
 fn register_account(
@@ -954,6 +1030,26 @@ fn configured_access_token(store: &TodoStore) -> Result<String> {
         .context("sync access token is not configured; run ltd sync login")
 }
 
+fn ensure_vault_metadata_write_allowed(store: &TodoStore, force: bool) -> Result<()> {
+    if store.encrypted_vault_key()?.is_some() && !force {
+        anyhow::bail!("local vault metadata already exists; use --force to overwrite");
+    }
+    Ok(())
+}
+
+fn import_remote_vault_metadata(
+    store: &TodoStore,
+    encrypted_vault_key: &lemontodo_crypto::EncryptedVaultKey,
+    force: bool,
+    master_password: &str,
+) -> Result<()> {
+    ensure_vault_metadata_write_allowed(store, force)?;
+    unwrap_vault_key(encrypted_vault_key, master_password)
+        .context("master password could not unlock downloaded vault metadata")?;
+    store.save_encrypted_vault_key(encrypted_vault_key)?;
+    Ok(())
+}
+
 fn load_vault_key(
     store: &TodoStore,
     key: Option<&str>,
@@ -1017,6 +1113,85 @@ fn prompt_account_password() -> Result<String> {
 
 fn prompt_master_password(prompt: &str) -> Result<String> {
     rpassword::prompt_password(prompt).context("failed to read master password")
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use lemontodo_crypto::{KdfParams, VaultKey, wrap_vault_key};
+    use lemontodo_storage::TodoStore;
+    use tempfile::tempdir;
+
+    use crate::import_remote_vault_metadata;
+
+    #[test]
+    fn import_remote_vault_metadata_saves_when_master_password_matches() -> Result<()> {
+        let tempdir = tempdir()?;
+        let store = TodoStore::open(tempdir.path().join("lemontodo.db"))?;
+        let encrypted = wrap_vault_key(
+            &VaultKey::generate(),
+            "correct horse battery staple",
+            KdfParams::generate_interactive(),
+        )?;
+
+        import_remote_vault_metadata(&store, &encrypted, false, "correct horse battery staple")?;
+
+        assert_eq!(store.encrypted_vault_key()?, Some(encrypted));
+        Ok(())
+    }
+
+    #[test]
+    fn import_remote_vault_metadata_rejects_wrong_master_password() -> Result<()> {
+        let tempdir = tempdir()?;
+        let store = TodoStore::open(tempdir.path().join("lemontodo.db"))?;
+        let encrypted = wrap_vault_key(
+            &VaultKey::generate(),
+            "correct horse battery staple",
+            KdfParams::generate_interactive(),
+        )?;
+
+        let error =
+            import_remote_vault_metadata(&store, &encrypted, false, "wrong password").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("master password could not unlock downloaded vault metadata")
+        );
+        assert!(store.encrypted_vault_key()?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn import_remote_vault_metadata_requires_force_to_overwrite() -> Result<()> {
+        let tempdir = tempdir()?;
+        let store = TodoStore::open(tempdir.path().join("lemontodo.db"))?;
+        let original = wrap_vault_key(
+            &VaultKey::generate(),
+            "first password",
+            KdfParams::generate_interactive(),
+        )?;
+        store.save_encrypted_vault_key(&original)?;
+        let replacement = wrap_vault_key(
+            &VaultKey::generate(),
+            "second password",
+            KdfParams::generate_interactive(),
+        )?;
+
+        let error = import_remote_vault_metadata(&store, &replacement, false, "second password")
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("local vault metadata already exists")
+        );
+        assert_eq!(store.encrypted_vault_key()?, Some(original));
+
+        import_remote_vault_metadata(&store, &replacement, true, "second password")?;
+        assert_eq!(store.encrypted_vault_key()?, Some(replacement));
+        Ok(())
+    }
 }
 
 fn run_tui(store: TodoStore) -> Result<()> {

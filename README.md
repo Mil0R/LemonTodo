@@ -140,6 +140,7 @@ cargo run -p lemontodo-tui -- ops
 cargo run -p lemontodo-tui -- sync configure --server-url http://127.0.0.1:8787 --email you@example.com
 cargo run -p lemontodo-tui -- sync register --email you@example.com
 cargo run -p lemontodo-tui -- sync login --email you@example.com
+cargo run -p lemontodo-tui -- sync connect --email you@example.com
 cargo run -p lemontodo-tui -- sync logout
 cargo run -p lemontodo-tui -- sync vault push
 cargo run -p lemontodo-tui -- sync vault pull
@@ -182,6 +183,7 @@ ltd sync pack --out ./sync-pack.json
 ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
 ltd sync register --email you@example.com
 ltd sync login --email you@example.com
+ltd sync connect --email you@example.com
 ltd sync status
 ltd sync logout
 ltd sync vault push
@@ -277,6 +279,13 @@ ltd sync vault push
 ltd sync push
 ```
 
+Connect a new device to an existing account:
+
+```bash
+ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
+ltd sync connect --email you@example.com
+```
+
 Pull and decrypt remote operations without applying them locally:
 
 ```bash
@@ -293,9 +302,10 @@ ltd sync pull --json
 `ltd sync conflicts` narrows the inbox to pending remote conflicts that need manual handling and shows the same revision context.
 `ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
-`ltd sync status` shows the configured server account email and whether an access token is stored locally.
+`ltd sync status` shows the configured server account email, whether an access token is stored locally, and whether local vault metadata exists.
 `ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first.
 `ltd sync vault push` uploads the local `EncryptedVaultKey` to the current server account. `ltd sync vault pull` downloads it for a new device and refuses to overwrite local metadata unless `--force` is passed.
+`ltd sync connect` is the recommended new-device onboarding command: it logs into the server account, downloads encrypted vault metadata, verifies that the provided master password can unlock it locally, and only then saves the local token and metadata.
 These commands prompt for the master password without echoing it to the terminal. Registration and login also prompt for the account password without echoing it. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:
@@ -312,7 +322,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, revoke the current session, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement session expiry management or full conflict resolution yet.
+This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement session expiry management or full conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 

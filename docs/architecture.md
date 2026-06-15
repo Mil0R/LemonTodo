@@ -253,6 +253,11 @@ New device flow:
 4. Client decrypts vault key locally.
 5. Client syncs encrypted objects and decrypts locally.
 
+MVP CLI mapping:
+
+1. `ltd sync connect --email <email>` performs steps 1-4 and refuses to save remote vault metadata unless the master password can unlock it locally.
+2. `ltd sync pull` then downloads encrypted sync objects for local apply.
+
 Forgotten master password cannot be recovered by the server.
 
 ## Self-Hosted Server
