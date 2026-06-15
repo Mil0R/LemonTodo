@@ -184,6 +184,14 @@ enum SyncCommand {
     },
     /// Apply safe pending remote operations.
     Apply,
+    /// Resolve a pending remote conflict explicitly.
+    Resolve {
+        /// Remote operation id prefix shown by `ltd sync inbox` or `ltd sync conflicts`.
+        operation: String,
+        /// Keep local data and ignore the conflicting remote operation.
+        #[arg(long)]
+        keep_local: bool,
+    },
     /// Mark local pending operations as synced after a successful upload.
     Ack {
         /// Server cursor returned by a future sync endpoint.
@@ -487,6 +495,20 @@ fn main() -> Result<()> {
                 println!(
                     "Applied {}, skipped {}, conflicts {}",
                     summary.applied, summary.skipped, summary.conflicts
+                );
+            }
+            SyncCommand::Resolve {
+                operation,
+                keep_local,
+            } => {
+                if !keep_local {
+                    anyhow::bail!("only --keep-local is supported right now");
+                }
+                let resolved = store.resolve_remote_conflict_keep_local(&operation)?;
+                println!(
+                    "Resolved {} as {}",
+                    short_id(&resolved.operation.id.to_string()),
+                    resolved.apply_status
                 );
             }
             SyncCommand::Ack {

@@ -262,12 +262,14 @@ Pull and decrypt remote operations without applying them locally:
 ltd sync pull
 ltd sync inbox
 ltd sync conflicts
+ltd sync resolve <remote-operation-id-prefix> --keep-local
 ltd sync apply
 ltd sync pull --json
 ```
 
 `ltd sync inbox` shows each pending remote operation with its apply status and skip/conflict reason when available.
 `ltd sync conflicts` narrows the inbox to pending remote conflicts that need manual handling.
+`ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:

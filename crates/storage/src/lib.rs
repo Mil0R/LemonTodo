@@ -399,6 +399,27 @@ impl TodoStore {
             .context("failed to list pending remote conflicts")
     }
 
+    pub fn resolve_remote_conflict_keep_local(
+        &self,
+        operation_id_prefix: &str,
+    ) -> Result<RemoteOperation> {
+        let remote = self.find_pending_remote_conflict_by_operation_prefix(operation_id_prefix)?;
+        let resolved_at = Utc::now();
+        self.conn.execute(
+            "UPDATE remote_operations
+             SET applied_at = ?1, apply_status = 'ignored', apply_reason = 'kept local changes'
+             WHERE id = ?2 AND applied_at IS NULL AND apply_status = 'conflict'",
+            params![resolved_at.to_rfc3339(), remote.id.to_string()],
+        )?;
+
+        Ok(RemoteOperation {
+            applied_at: Some(resolved_at),
+            apply_status: "ignored".to_owned(),
+            apply_reason: Some("kept local changes".to_owned()),
+            ..remote
+        })
+    }
+
     pub fn pending_remote_operation_count(&self) -> Result<usize> {
         self.conn
             .query_row(
@@ -1269,6 +1290,33 @@ impl TodoStore {
             )
             .context("failed to query pending local operations")
     }
+
+    fn find_pending_remote_conflict_by_operation_prefix(
+        &self,
+        operation_id_prefix: &str,
+    ) -> Result<RemoteOperation> {
+        let prefix = operation_id_prefix.trim();
+        if prefix.is_empty() {
+            bail!("remote operation id prefix cannot be empty");
+        }
+
+        let like_pattern = format!("{prefix}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, operation_json, server_cursor, pulled_at, applied_at, apply_status, apply_reason
+             FROM remote_operations
+             WHERE operation_id LIKE ?1 AND applied_at IS NULL AND apply_status = 'conflict'
+             ORDER BY pulled_at ASC, operation_id ASC",
+        )?;
+        let matches = stmt
+            .query_map(params![like_pattern], row_to_remote_operation)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        match matches.len() {
+            0 => bail!("no pending remote conflict matches id prefix {prefix}"),
+            1 => Ok(matches.into_iter().next().expect("checked length")),
+            _ => bail!("multiple pending remote conflicts match id prefix {prefix}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2059,6 +2107,122 @@ mod tests {
         let conflicts = store.pending_remote_conflicts().unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].operation.id, operation.id);
+    }
+
+    #[test]
+    fn resolves_remote_conflict_by_keeping_local_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let project = List {
+            id: Uuid::new_v4(),
+            name: "Remote Project".to_owned(),
+            revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let task = Task {
+            id: Uuid::new_v4(),
+            list_id: project.id,
+            revision: 1,
+            title: "Remote Task".to_owned(),
+            note_markdown: String::new(),
+            status: TaskStatus::Open,
+            tags: Vec::new(),
+            due_date: None,
+            sort_key: "0001".to_owned(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+        };
+        let create_operations = vec![
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: project.id,
+                object_revision: project.revision,
+                object_type: ObjectType::List,
+                operation_type: OperationType::Create,
+                payload: json!({ "list": project }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: task.id,
+                object_revision: task.revision,
+                object_type: ObjectType::Task,
+                operation_type: OperationType::Create,
+                payload: json!({ "task": task }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+        ];
+        store
+            .save_remote_operations(&create_operations, "cursor-1")
+            .unwrap();
+        store.apply_pending_remote_operations().unwrap();
+        store
+            .update_task_title_by_id(create_operations[1].object_id, "Local Pending")
+            .unwrap();
+
+        let mut updated_task = create_operations[1].payload["task"].clone();
+        updated_task["revision"] = json!(3);
+        updated_task["title"] = json!("Updated Remotely");
+        let conflict_operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: create_operations[1].object_id,
+            object_revision: 3,
+            object_type: ObjectType::Task,
+            operation_type: OperationType::Update,
+            payload: json!({ "task": updated_task }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        store
+            .save_remote_operations(std::slice::from_ref(&conflict_operation), "cursor-2")
+            .unwrap();
+        store.apply_pending_remote_operations().unwrap();
+
+        let resolved = store
+            .resolve_remote_conflict_keep_local(&conflict_operation.id.to_string()[..8])
+            .unwrap();
+        assert_eq!(resolved.operation.id, conflict_operation.id);
+        assert_eq!(resolved.apply_status, "ignored");
+        assert_eq!(resolved.apply_reason, Some("kept local changes".to_owned()));
+        assert!(resolved.applied_at.is_some());
+        assert!(store.pending_remote_conflicts().unwrap().is_empty());
+        assert!(store.pending_remote_operations().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_resolving_non_conflicting_remote_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: Uuid::new_v4(),
+            object_revision: 1,
+            object_type: ObjectType::Snapshot,
+            operation_type: OperationType::ImportSnapshot,
+            payload: json!({ "imported_at": Utc::now() }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        store
+            .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
+            .unwrap();
+        store.apply_pending_remote_operations().unwrap();
+
+        let error = store
+            .resolve_remote_conflict_keep_local(&operation.id.to_string()[..8])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no pending remote conflict matches id prefix"));
     }
 
     #[test]
