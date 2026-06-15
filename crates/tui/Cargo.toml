@@ -21,6 +21,7 @@ lemontodo-crypto = { path = "../crypto" }
 lemontodo-storage = { path = "../storage" }
 lemontodo-sync = { path = "../sync" }
 ratatui.workspace = true
+rpassword.workspace = true
 serde_json.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true

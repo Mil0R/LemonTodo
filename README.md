@@ -134,9 +134,9 @@ ltd archive <task-id-prefix>
 ltd export ./lemontodo.snapshot.json
 ltd import ./lemontodo.snapshot.json
 ltd ops
-ltd vault init --master-password "dev-password"
+ltd vault init
 ltd vault status
-ltd sync pack --master-password "dev-password" --out ./sync-pack.json
+ltd sync pack --out ./sync-pack.json
 ltd move <task-id-prefix> LemonTodo
 ```
 
@@ -197,16 +197,23 @@ The current `dev` branch can initialize local encrypted vault metadata and pack 
 Initialize local vault metadata:
 
 ```bash
-ltd vault init --master-password "dev-password"
+ltd vault init
 ```
 
 Create an encrypted sync pack:
 
 ```bash
-ltd sync pack --master-password "dev-password" --out ./sync-pack.json
+ltd sync pack --out ./sync-pack.json
 ```
 
-This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
+These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
+
+For scripts and local development only, `--master-password` is still supported:
+
+```bash
+ltd vault init --master-password "dev-password"
+ltd sync pack --master-password "dev-password" --out ./sync-pack.json
+```
 
 For low-level development, a raw vault key can still be generated and used directly:
 
@@ -221,5 +228,5 @@ This is a local E2EE dry-run for the future sync protocol. It does not implement
 
 - No remote sync yet.
 - No server yet.
-- Master password is passed through CLI flags for now; this should move to hidden interactive input and OS keyring support later.
+- OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log for future sync work.

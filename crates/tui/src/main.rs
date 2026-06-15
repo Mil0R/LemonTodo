@@ -121,6 +121,7 @@ enum SyncCommand {
     Pack {
         #[arg(long)]
         key: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
         #[arg(long)]
         master_password: Option<String>,
         #[arg(long, value_name = "PATH")]
@@ -132,8 +133,9 @@ enum SyncCommand {
 enum VaultCommand {
     /// Initialize local vault metadata with a master password.
     Init {
+        /// Development/script compatibility. Prefer hidden prompt.
         #[arg(long)]
-        master_password: String,
+        master_password: Option<String>,
     },
     /// Show whether local vault metadata exists.
     Status,
@@ -282,7 +284,7 @@ fn main() -> Result<()> {
                 master_password,
                 out,
             } => {
-                let vault_key = load_vault_key(&store, key.as_deref(), master_password.as_deref())?;
+                let vault_key = load_vault_key(&store, key.as_deref(), master_password)?;
                 let operations = store.pending_operations()?;
                 let pack = pack_operations(&vault_key, &operations)?;
                 let json = serde_json::to_string_pretty(&pack)?;
@@ -304,6 +306,9 @@ fn main() -> Result<()> {
                 if store.encrypted_vault_key()?.is_some() {
                     anyhow::bail!("local vault metadata already exists");
                 }
+                let master_password = master_password
+                    .map(Ok)
+                    .unwrap_or_else(prompt_new_master_password)?;
                 let vault_key = VaultKey::generate();
                 let encrypted_vault_key = wrap_vault_key(
                     &vault_key,
@@ -334,7 +339,7 @@ fn main() -> Result<()> {
 fn load_vault_key(
     store: &TodoStore,
     key: Option<&str>,
-    master_password: Option<&str>,
+    master_password: Option<String>,
 ) -> Result<VaultKey> {
     match (key, master_password) {
         (Some(key), None) => VaultKey::from_hex(key),
@@ -342,15 +347,35 @@ fn load_vault_key(
             let encrypted = store
                 .encrypted_vault_key()?
                 .context("local vault metadata is not initialized; run ltd vault init first")?;
-            unwrap_vault_key(&encrypted, master_password)
+            unwrap_vault_key(&encrypted, &master_password)
+        }
+        (None, None) => {
+            let encrypted = store
+                .encrypted_vault_key()?
+                .context("local vault metadata is not initialized; run ltd vault init first")?;
+            let master_password = prompt_master_password("Master password: ")?;
+            unwrap_vault_key(&encrypted, &master_password)
         }
         (Some(_), Some(_)) => {
             anyhow::bail!("use either --key or --master-password, not both")
         }
-        (None, None) => {
-            anyhow::bail!("sync pack requires --master-password or --key")
-        }
     }
+}
+
+fn prompt_new_master_password() -> Result<String> {
+    let password = prompt_master_password("New master password: ")?;
+    let confirmation = prompt_master_password("Confirm master password: ")?;
+    if password != confirmation {
+        anyhow::bail!("master passwords do not match");
+    }
+    if password.is_empty() {
+        anyhow::bail!("master password cannot be empty");
+    }
+    Ok(password)
+}
+
+fn prompt_master_password(prompt: &str) -> Result<String> {
+    rpassword::prompt_password(prompt).context("failed to read master password")
 }
 
 fn run_tui(store: TodoStore) -> Result<()> {
