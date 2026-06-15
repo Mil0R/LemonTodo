@@ -1,10 +1,11 @@
 use lemontodo_core::{Task, TaskStatus};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode};
 
@@ -24,7 +25,7 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     draw_footer(frame, chunks[2], app);
 
     if app.mode() != Mode::Browse {
-        let input_width = app.input().chars().count() as u16;
+        let input_width = UnicodeWidthStr::width(app.input()) as u16;
         frame.set_cursor_position((chunks[2].x + input_width + 1, chunks[2].y + 1));
     }
 
@@ -54,15 +55,10 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     };
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "LemonTodo",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("LemonTodo", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled(help, Style::default().fg(Color::DarkGray)),
-        Span::styled(search, Style::default().fg(Color::Green)),
+        Span::styled(help, Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(search, Style::default().add_modifier(Modifier::ITALIC)),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, area);
@@ -72,7 +68,7 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let items = if app.tasks().is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "No tasks. Press 'a' to add one.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().add_modifier(Modifier::DIM),
         )))]
     } else {
         app.tasks().iter().map(task_item).collect()
@@ -87,7 +83,7 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         .block(Block::default().title("Tasks").borders(Borders::ALL))
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .add_modifier(Modifier::REVERSED)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
@@ -110,9 +106,7 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 }
 
 fn input_footer<'a>(title: &'a str, input: &'a str) -> Paragraph<'a> {
-    Paragraph::new(input)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .style(Style::default().fg(Color::Yellow))
+    Paragraph::new(input).block(Block::default().title(title).borders(Borders::ALL))
 }
 
 fn task_item(task: &Task) -> ListItem<'_> {
@@ -138,23 +132,20 @@ fn task_item(task: &Task) -> ListItem<'_> {
         )
     };
 
-    let style = match task.status {
-        TaskStatus::Open => Style::default().fg(Color::White),
-        TaskStatus::Done => Style::default().fg(Color::DarkGray),
-        TaskStatus::Archived => Style::default().fg(Color::DarkGray),
+    let task_style = match task.status {
+        TaskStatus::Open => Style::default(),
+        TaskStatus::Done | TaskStatus::Archived => Style::default().add_modifier(Modifier::DIM),
     };
+    let meta_style = Style::default().add_modifier(Modifier::DIM);
 
     ListItem::new(Line::from(vec![
-        Span::styled(marker, style),
+        Span::styled(marker, task_style),
         Span::raw(" "),
-        Span::styled(
-            short_id(&task.id.to_string()).to_owned(),
-            style.fg(Color::Cyan),
-        ),
+        Span::styled(short_id(&task.id.to_string()).to_owned(), meta_style),
         Span::raw(" "),
-        Span::styled(task.title.clone(), style),
-        Span::styled(due, Style::default().fg(Color::Magenta)),
-        Span::styled(tags, Style::default().fg(Color::Green)),
+        Span::styled(task.title.clone(), task_style),
+        Span::styled(due, meta_style),
+        Span::styled(tags, meta_style),
     ]))
 }
 

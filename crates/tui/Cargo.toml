@@ -20,4 +20,5 @@ lemontodo-core = { path = "../core" }
 lemontodo-storage = { path = "../storage" }
 ratatui.workspace = true
 serde_json.workspace = true
+unicode-width.workspace = true
 uuid.workspace = true
