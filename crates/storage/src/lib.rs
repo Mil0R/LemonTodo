@@ -28,6 +28,13 @@ pub struct RemoteOperation {
     pub applied_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RemoteApplySummary {
+    pub applied: usize,
+    pub skipped: usize,
+    pub conflicts: usize,
+}
+
 impl TodoStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -385,6 +392,38 @@ impl TodoStore {
                 |row| row.get::<_, usize>(0),
             )
             .context("failed to count pending remote operations")
+    }
+
+    pub fn apply_pending_remote_creates(&self) -> Result<RemoteApplySummary> {
+        let mut pending = self.pending_remote_operations()?;
+        pending.sort_by_key(|remote| match remote.operation.object_type {
+            ObjectType::List => 0,
+            ObjectType::Task => 1,
+            ObjectType::Snapshot => 2,
+        });
+        let mut summary = RemoteApplySummary::default();
+
+        for remote in pending {
+            let result = match (
+                remote.operation.object_type,
+                remote.operation.operation_type,
+            ) {
+                (ObjectType::List, OperationType::Create) => self.apply_remote_list_create(&remote),
+                (ObjectType::Task, OperationType::Create) => self.apply_remote_task_create(&remote),
+                _ => {
+                    summary.skipped += 1;
+                    continue;
+                }
+            }?;
+
+            match result {
+                RemoteApplyResult::Applied => summary.applied += 1,
+                RemoteApplyResult::Skipped => summary.skipped += 1,
+                RemoteApplyResult::Conflict => summary.conflicts += 1,
+            }
+        }
+
+        Ok(summary)
     }
 
     pub fn save_encrypted_vault_key(&self, encrypted_vault_key: &EncryptedVaultKey) -> Result<()> {
@@ -1017,6 +1056,98 @@ impl TodoStore {
             _ => bail!("multiple operations match id prefix {prefix}"),
         }
     }
+
+    fn apply_remote_list_create(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
+        let list = remote_operation_payload::<List>(&remote.operation, "list")?;
+        if self.find_list_by_id(list.id)?.is_some() || self.find_list_by_name(&list.name)?.is_some()
+        {
+            return Ok(RemoteApplyResult::Conflict);
+        }
+
+        self.conn.execute(
+            "INSERT INTO lists (id, name, revision, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                list.id.to_string(),
+                list.name,
+                list.revision,
+                list.created_at.to_rfc3339(),
+                list.updated_at.to_rfc3339(),
+            ],
+        )?;
+        self.mark_remote_operation_applied(remote.id)?;
+        Ok(RemoteApplyResult::Applied)
+    }
+
+    fn apply_remote_task_create(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
+        let task = remote_operation_payload::<Task>(&remote.operation, "task")?;
+        if self.find_task_any_by_id(task.id)?.is_some() {
+            return Ok(RemoteApplyResult::Conflict);
+        }
+        if self.find_list_by_id(task.list_id)?.is_none() {
+            return Ok(RemoteApplyResult::Skipped);
+        }
+
+        self.conn.execute(
+            "INSERT INTO tasks (
+                id, list_id, revision, title, note_markdown, status, tags, due_date,
+                sort_key, created_at, updated_at, deleted_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                task.id.to_string(),
+                task.list_id.to_string(),
+                task.revision,
+                task.title,
+                task.note_markdown,
+                task.status.as_str(),
+                serde_json::to_string(&task.tags)?,
+                task.due_date.map(|date| date.to_string()),
+                task.sort_key,
+                task.created_at.to_rfc3339(),
+                task.updated_at.to_rfc3339(),
+                task.deleted_at.map(|date| date.to_rfc3339()),
+            ],
+        )?;
+        self.mark_remote_operation_applied(remote.id)?;
+        Ok(RemoteApplyResult::Applied)
+    }
+
+    fn mark_remote_operation_applied(&self, id: Uuid) -> Result<()> {
+        self.conn.execute(
+            "UPDATE remote_operations SET applied_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn find_list_by_id(&self, id: Uuid) -> Result<Option<List>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, revision, created_at, updated_at FROM lists WHERE id = ?1",
+                params![id.to_string()],
+                row_to_list,
+            )
+            .optional()
+            .context("failed to query list by id")
+    }
+
+    fn find_task_any_by_id(&self, id: Uuid) -> Result<Option<Task>> {
+        self.conn
+            .query_row(
+                &format!("{} FROM tasks WHERE id = ?1", select_task_columns()),
+                params![id.to_string()],
+                row_to_task,
+            )
+            .optional()
+            .context("failed to query task by id")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteApplyResult {
+    Applied,
+    Skipped,
+    Conflict,
 }
 
 fn row_to_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<List> {
@@ -1126,6 +1257,20 @@ fn payload_revision(payload: &serde_json::Value) -> Option<i64> {
         .or_else(|| payload.get("list"))
         .and_then(|object| object.get("revision"))
         .and_then(serde_json::Value::as_i64)
+}
+
+fn remote_operation_payload<T: serde::de::DeserializeOwned>(
+    operation: &Operation,
+    key: &str,
+) -> Result<T> {
+    let value = operation.payload.get(key).with_context(|| {
+        format!(
+            "remote operation {} missing payload key {key}",
+            operation.id
+        )
+    })?;
+    serde_json::from_value(value.clone())
+        .with_context(|| format!("failed to parse remote operation {} payload", operation.id))
 }
 
 fn set_sync_state_on_connection(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -1454,6 +1599,113 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].operation.id, operation.id);
         assert_eq!(pending[0].server_cursor, "cursor-1");
+        assert_eq!(store.pending_remote_operation_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn applies_remote_create_operations_when_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let project = List {
+            id: Uuid::new_v4(),
+            name: "Remote Project".to_owned(),
+            revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let task = Task {
+            id: Uuid::new_v4(),
+            list_id: project.id,
+            revision: 1,
+            title: "Remote Task".to_owned(),
+            note_markdown: String::new(),
+            status: TaskStatus::Open,
+            tags: Vec::new(),
+            due_date: None,
+            sort_key: "0001".to_owned(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+        };
+        let operations = vec![
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: project.id,
+                object_revision: 1,
+                object_type: ObjectType::List,
+                operation_type: OperationType::Create,
+                payload: json!({ "list": project }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: task.id,
+                object_revision: 1,
+                object_type: ObjectType::Task,
+                operation_type: OperationType::Create,
+                payload: json!({ "task": task }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+        ];
+
+        store
+            .save_remote_operations(&operations, "cursor-2")
+            .unwrap();
+        let summary = store.apply_pending_remote_creates().unwrap();
+        assert_eq!(summary.applied, 2);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.conflicts, 0);
+        assert_eq!(store.pending_remote_operation_count().unwrap(), 0);
+        assert_eq!(
+            store
+                .list_tasks_for_project(true, Some("Remote Project"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn leaves_remote_task_create_pending_when_list_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let task = Task {
+            id: Uuid::new_v4(),
+            list_id: Uuid::new_v4(),
+            revision: 1,
+            title: "Missing Project Task".to_owned(),
+            note_markdown: String::new(),
+            status: TaskStatus::Open,
+            tags: Vec::new(),
+            due_date: None,
+            sort_key: "0001".to_owned(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+        };
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: task.id,
+            object_revision: 1,
+            object_type: ObjectType::Task,
+            operation_type: OperationType::Create,
+            payload: json!({ "task": task }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        store
+            .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
+            .unwrap();
+        let summary = store.apply_pending_remote_creates().unwrap();
+        assert_eq!(summary.applied, 0);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.conflicts, 0);
         assert_eq!(store.pending_remote_operation_count().unwrap(), 1);
     }
 }

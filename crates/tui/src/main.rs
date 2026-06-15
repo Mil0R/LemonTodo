@@ -176,6 +176,8 @@ enum SyncCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Apply safe pending remote create operations.
+    Apply,
     /// Mark local pending operations as synced after a successful upload.
     Ack {
         /// Server cursor returned by a future sync endpoint.
@@ -470,6 +472,13 @@ fn main() -> Result<()> {
                         );
                     }
                 }
+            }
+            SyncCommand::Apply => {
+                let summary = store.apply_pending_remote_creates()?;
+                println!(
+                    "Applied {}, skipped {}, conflicts {}",
+                    summary.applied, summary.skipped, summary.conflicts
+                );
             }
             SyncCommand::Ack {
                 cursor,

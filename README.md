@@ -261,6 +261,7 @@ Pull and decrypt remote operations without applying them locally:
 ```bash
 ltd sync pull
 ltd sync inbox
+ltd sync apply
 ltd sync pull --json
 ```
 
@@ -280,7 +281,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can upload encrypted objects, decrypt pulled objects, and store them in a local pending-apply inbox, but it does not implement account login, pull-apply, or conflict resolution yet.
+This is still an E2EE sync dry-run. It can upload encrypted objects, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates. It does not implement account login or conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 
@@ -291,7 +292,7 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 
 ## Current Limitations
 
-- Remote push exists; remote pull stores pending remote operations but does not apply them to local tasks yet.
+- Remote push exists; remote pull stores pending remote operations, and apply only handles safe remote creates.
 - Server has `/healthz`, `/v1/server-info`, unauthenticated `/v1/sync/push` blind-object storage, and unauthenticated cursor-based `/v1/sync/pull`; account auth is not implemented yet.
 - OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log; `ltd sync ack` remains useful for manual dry-runs, while `ltd sync push` acknowledges accepted server uploads automatically.

@@ -1061,6 +1061,7 @@ dependencies = [
  "lemontodo-core",
  "lemontodo-crypto",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "uuid",
