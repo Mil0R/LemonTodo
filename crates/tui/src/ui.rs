@@ -6,12 +6,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Mode, ViewMode};
 
 const SHORT_HELP: &str = "j/k select  space toggle  a add  e edit  m move  ? help  q quit";
 const READY_MESSAGE: &str = "Ready";
+const PROJECT_CELL_WIDTH: usize = 28;
+const VIEW_CELL_WIDTH: usize = 13;
+const FILTER_CELL_WIDTH: usize = 24;
 
 pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
@@ -50,26 +53,28 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 }
 
 fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let search = if app.search_query().is_empty() {
-        String::new()
+    let project = fixed_cell(
+        &format!("project: {}", app.current_project_name()),
+        PROJECT_CELL_WIDTH,
+    );
+    let view = fixed_cell(&format!("view: {}", app.view_mode_name()), VIEW_CELL_WIDTH);
+    let filter = if app.search_query().is_empty() {
+        fixed_cell("", FILTER_CELL_WIDTH)
     } else {
-        format!("  filter: {}", app.search_query())
+        fixed_cell(
+            &format!("filter: {}", app.search_query()),
+            FILTER_CELL_WIDTH,
+        )
     };
 
     let title = Paragraph::new(Line::from(vec![
         Span::styled("LemonTodo", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled(
-            format!("project: {}", app.current_project_name()),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(project, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled(
-            format!("view: {}", app.view_mode_name()),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(view, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
-        Span::styled(search, Style::default().add_modifier(Modifier::ITALIC)),
+        Span::styled(filter, Style::default().add_modifier(Modifier::ITALIC)),
         Span::raw("  |  "),
         Span::styled(SHORT_HELP, Style::default().add_modifier(Modifier::DIM)),
     ]))
@@ -187,6 +192,36 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
 
 fn input_footer<'a>(title: &'a str, input: &'a str) -> Paragraph<'a> {
     Paragraph::new(input).block(Block::default().title(title).borders(Borders::ALL))
+}
+
+fn fixed_cell(value: &str, width: usize) -> String {
+    let fitted = truncate_to_width(value, width);
+    let padding = width.saturating_sub(UnicodeWidthStr::width(fitted.as_str()));
+    format!("{fitted}{}", " ".repeat(padding))
+}
+
+fn truncate_to_width(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    let target_width = width.saturating_sub(ellipsis_width);
+    let mut output = String::new();
+    let mut used_width = 0;
+
+    for value in value.chars() {
+        let char_width = UnicodeWidthChar::width(value).unwrap_or(0);
+        if used_width + char_width > target_width {
+            break;
+        }
+        output.push(value);
+        used_width += char_width;
+    }
+
+    output.push_str(ellipsis);
+    output
 }
 
 fn task_item<'a>(
