@@ -14,7 +14,6 @@ const SHORT_HELP: &str = "j/k select  space toggle  a add  e edit  m move  ? hel
 const READY_MESSAGE: &str = "Ready";
 const PROJECT_CELL_WIDTH: usize = 28;
 const VIEW_CELL_WIDTH: usize = 13;
-const FILTER_CELL_WIDTH: usize = 24;
 
 pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
@@ -59,12 +58,9 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     );
     let view = fixed_cell(&format!("view: {}", app.view_mode_name()), VIEW_CELL_WIDTH);
     let filter = if app.search_query().is_empty() {
-        fixed_cell("", FILTER_CELL_WIDTH)
+        String::new()
     } else {
-        fixed_cell(
-            &format!("filter: {}", app.search_query()),
-            FILTER_CELL_WIDTH,
-        )
+        format!("  filter: {}", truncate_to_width(app.search_query(), 24))
     };
 
     let title = Paragraph::new(Line::from(vec![
@@ -73,10 +69,9 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Span::styled(project, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw("  "),
         Span::styled(view, Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(filter, Style::default().add_modifier(Modifier::ITALIC)),
         Span::raw("  |  "),
         Span::styled(SHORT_HELP, Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(filter, Style::default().add_modifier(Modifier::ITALIC)),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, area);
