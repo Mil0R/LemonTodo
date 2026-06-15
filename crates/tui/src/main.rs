@@ -1,7 +1,7 @@
 mod app;
 mod ui;
 
-use std::{io, path::PathBuf, time::Duration};
+use std::{fs, io, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
@@ -66,6 +66,16 @@ enum Command {
     },
     /// Replace task tags by id prefix.
     Tags { id: String, tags: Vec<String> },
+    /// Export local data as JSON snapshot.
+    Export {
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
+    /// Import a JSON snapshot.
+    Import {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+    },
     /// Archive a task by id prefix.
     Archive { id: String },
 }
@@ -142,6 +152,26 @@ fn main() -> Result<()> {
                 short_id(&task.id.to_string()),
                 task.title
             );
+        }
+        Some(Command::Export { path }) => {
+            let snapshot = store.export_snapshot()?;
+            let json = serde_json::to_string_pretty(&snapshot)?;
+            if let Some(path) = path {
+                fs::write(&path, json)
+                    .with_context(|| format!("failed to write export {}", path.display()))?;
+                println!("Exported LemonTodo snapshot to {}", path.display());
+            } else {
+                println!("{json}");
+            }
+        }
+        Some(Command::Import { path }) => {
+            let json = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read import {}", path.display()))?;
+            let snapshot = serde_json::from_str(&json)
+                .with_context(|| format!("failed to parse import {}", path.display()))?;
+            let mut store = store;
+            store.import_snapshot(snapshot)?;
+            println!("Imported LemonTodo snapshot from {}", path.display());
         }
         Some(Command::Archive { id }) => {
             let task = store.archive_task(&id)?;

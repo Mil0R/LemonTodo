@@ -37,6 +37,8 @@ cargo run -p lemontodo-tui -- note <task-id-prefix> "Markdown note"
 cargo run -p lemontodo-tui -- due <task-id-prefix> 2026-06-30
 cargo run -p lemontodo-tui -- due <task-id-prefix>
 cargo run -p lemontodo-tui -- tags <task-id-prefix> mvp terminal
+cargo run -p lemontodo-tui -- export ./lemontodo.snapshot.json
+cargo run -p lemontodo-tui -- import ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- done <task-id-prefix>
 cargo run -p lemontodo-tui -- archive <task-id-prefix>
 ```

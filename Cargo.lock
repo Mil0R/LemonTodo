@@ -556,6 +556,7 @@ dependencies = [
  "lemontodo-core",
  "lemontodo-storage",
  "ratatui",
+ "serde_json",
  "uuid",
 ]
 

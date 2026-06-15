@@ -41,6 +41,18 @@ pub struct List {
     pub updated_at: DateTime<Utc>,
 }
 
+impl List {
+    pub fn inbox() -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            name: "Inbox".to_owned(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: Uuid,
@@ -54,6 +66,27 @@ pub struct Task {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoSnapshot {
+    pub version: u32,
+    pub exported_at: DateTime<Utc>,
+    pub lists: Vec<List>,
+    pub tasks: Vec<Task>,
+}
+
+impl TodoSnapshot {
+    pub const CURRENT_VERSION: u32 = 1;
+
+    pub fn new(lists: Vec<List>, tasks: Vec<Task>) -> Self {
+        Self {
+            version: Self::CURRENT_VERSION,
+            exported_at: Utc::now(),
+            lists,
+            tasks,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

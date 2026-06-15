@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
-use lemontodo_core::{List, NewTask, Task, TaskStatus};
+use lemontodo_core::{List, NewTask, Task, TaskStatus, TodoSnapshot};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
@@ -70,6 +70,97 @@ impl TodoStore {
         Ok(task)
     }
 
+    pub fn export_snapshot(&self) -> Result<TodoSnapshot> {
+        Ok(TodoSnapshot::new(
+            self.list_lists()?,
+            self.list_all_tasks()?,
+        ))
+    }
+
+    pub fn import_snapshot(&mut self, snapshot: TodoSnapshot) -> Result<()> {
+        if snapshot.version != TodoSnapshot::CURRENT_VERSION {
+            bail!(
+                "unsupported snapshot version {}, expected {}",
+                snapshot.version,
+                TodoSnapshot::CURRENT_VERSION
+            );
+        }
+
+        let tx = self.conn.transaction()?;
+        let mut list_id_map = HashMap::new();
+        for list in snapshot.lists {
+            let existing_id = tx
+                .query_row(
+                    "SELECT id FROM lists WHERE name = ?1",
+                    params![list.name],
+                    |row| parse_uuid(row.get::<_, String>(0)?),
+                )
+                .optional()?;
+
+            let target_id = if let Some(existing_id) = existing_id {
+                tx.execute(
+                    "UPDATE lists SET updated_at = ?1 WHERE id = ?2",
+                    params![list.updated_at.to_rfc3339(), existing_id.to_string()],
+                )?;
+                existing_id
+            } else {
+                tx.execute(
+                    "INSERT INTO lists (id, name, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        list.id.to_string(),
+                        list.name,
+                        list.created_at.to_rfc3339(),
+                        list.updated_at.to_rfc3339(),
+                    ],
+                )?;
+                list.id
+            };
+            list_id_map.insert(list.id, target_id);
+        }
+
+        for task in snapshot.tasks {
+            let list_id = list_id_map
+                .get(&task.list_id)
+                .copied()
+                .unwrap_or(task.list_id);
+            tx.execute(
+                "INSERT INTO tasks (
+                    id, list_id, title, note_markdown, status, tags, due_date,
+                    sort_key, created_at, updated_at, deleted_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ON CONFLICT(id) DO UPDATE SET
+                    list_id = excluded.list_id,
+                    title = excluded.title,
+                    note_markdown = excluded.note_markdown,
+                    status = excluded.status,
+                    tags = excluded.tags,
+                    due_date = excluded.due_date,
+                    sort_key = excluded.sort_key,
+                    created_at = excluded.created_at,
+                    updated_at = excluded.updated_at,
+                    deleted_at = excluded.deleted_at",
+                params![
+                    task.id.to_string(),
+                    list_id.to_string(),
+                    task.title,
+                    task.note_markdown,
+                    task.status.as_str(),
+                    serde_json::to_string(&task.tags)?,
+                    task.due_date.map(|date| date.to_string()),
+                    task.sort_key,
+                    task.created_at.to_rfc3339(),
+                    task.updated_at.to_rfc3339(),
+                    task.deleted_at.map(|date| date.to_rfc3339()),
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        self.ensure_inbox()?;
+        Ok(())
+    }
+
     pub fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
         let sql = format!(
             "{} WHERE {} ORDER BY status = 'done', sort_key ASC",
@@ -85,6 +176,26 @@ impl TodoStore {
         let rows = stmt.query_map([], row_to_task)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list tasks")
+    }
+
+    fn list_lists(&self) -> Result<Vec<List>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, created_at, updated_at FROM lists ORDER BY name ASC")?;
+        let rows = stmt.query_map([], row_to_list)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list lists")
+    }
+
+    fn list_all_tasks(&self) -> Result<Vec<Task>> {
+        let sql = format!(
+            "{} WHERE deleted_at IS NULL ORDER BY status = 'done', sort_key ASC",
+            select_task_sql()
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], row_to_task)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list all tasks")
     }
 
     pub fn search_tasks(&self, query: &str) -> Result<Vec<Task>> {
@@ -279,6 +390,25 @@ impl TodoStore {
 
             CREATE INDEX IF NOT EXISTS idx_tasks_status_sort
                 ON tasks(status, sort_key);
+
+            CREATE TABLE IF NOT EXISTS operations (
+                id TEXT PRIMARY KEY,
+                object_id TEXT NOT NULL,
+                object_type TEXT NOT NULL,
+                operation_type TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                synced_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_operations_synced
+                ON operations(synced_at, created_at);
+
+            CREATE TABLE IF NOT EXISTS sync_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             ",
         )?;
         Ok(())
@@ -289,13 +419,7 @@ impl TodoStore {
             return Ok(list);
         }
 
-        let now = Utc::now();
-        let list = List {
-            id: Uuid::new_v4(),
-            name: "Inbox".to_owned(),
-            created_at: now,
-            updated_at: now,
-        };
+        let list = List::inbox();
 
         self.conn.execute(
             "INSERT INTO lists (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
@@ -321,14 +445,7 @@ impl TodoStore {
             .query_row(
                 "SELECT id, name, created_at, updated_at FROM lists WHERE name = ?1",
                 params![name],
-                |row| {
-                    Ok(List {
-                        id: parse_uuid(row.get::<_, String>(0)?)?,
-                        name: row.get(1)?,
-                        created_at: parse_datetime(row.get::<_, String>(2)?)?,
-                        updated_at: parse_datetime(row.get::<_, String>(3)?)?,
-                    })
-                },
+                row_to_list,
             )
             .optional()
             .context("failed to query list")
@@ -374,6 +491,15 @@ impl TodoStore {
             .optional()?
             .with_context(|| format!("no task matches id {id}"))
     }
+}
+
+fn row_to_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<List> {
+    Ok(List {
+        id: parse_uuid(row.get::<_, String>(0)?)?,
+        name: row.get(1)?,
+        created_at: parse_datetime(row.get::<_, String>(2)?)?,
+        updated_at: parse_datetime(row.get::<_, String>(3)?)?,
+    })
 }
 
 fn select_task_sql() -> &'static str {
@@ -490,5 +616,28 @@ mod tests {
         let archived = store.archive_task_by_id(task.id).unwrap();
         assert_eq!(archived.status, TaskStatus::Archived);
         assert!(store.list_tasks(true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn exports_and_imports_snapshot() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = TodoStore::open(source_dir.path().join("source.db")).unwrap();
+        let mut task = NewTask::new("Export me");
+        task.note_markdown = "Snapshot note".to_owned();
+        task.tags = vec!["backup".to_owned()];
+        source.add_task(task).unwrap();
+
+        let snapshot = source.export_snapshot().unwrap();
+        assert_eq!(snapshot.version, TodoSnapshot::CURRENT_VERSION);
+        assert_eq!(snapshot.tasks.len(), 1);
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let mut target = TodoStore::open(target_dir.path().join("target.db")).unwrap();
+        target.import_snapshot(snapshot).unwrap();
+
+        let imported = target.search_tasks("backup").unwrap();
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].title, "Export me");
+        assert_eq!(imported[0].note_markdown, "Snapshot note");
     }
 }

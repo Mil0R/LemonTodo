@@ -114,6 +114,10 @@ Suggested local tables:
 - sync_state
 - conflicts
 
+The current local implementation includes `tasks`, `lists`, `operations`, and `sync_state`. `operations` and `sync_state` are schema placeholders for the upcoming encrypted sync layer and are not yet used for remote synchronization.
+
+Local backup and migration should use the versioned JSON snapshot format exposed by `ltd export` and `ltd import`. This is a developer-facing interchange format, not the final encrypted sync protocol.
+
 Do not use Markdown files as the only source of truth. Markdown should be a note field and an import/export format.
 
 ## Task Model
