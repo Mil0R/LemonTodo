@@ -7,10 +7,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use lemontodo_sync::{
-    AcceptedSyncObject, EncryptedSyncObject, PROTOCOL_VERSION, PushRequest, PushResponse,
-    RejectedSyncObject, RejectionReason, ServerInfo,
+    AcceptedSyncObject, EncryptedSyncObject, PROTOCOL_VERSION, PullRequest, PullResponse,
+    PushRequest, PushResponse, RejectedSyncObject, RejectionReason, ServerInfo,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -155,6 +155,48 @@ impl ServerStore {
         })
     }
 
+    pub fn pull(&self, request: PullRequest) -> Result<PullResponse> {
+        let current_cursor = self.current_cursor()?;
+        if request.protocol_version != PROTOCOL_VERSION {
+            return Ok(PullResponse {
+                protocol_version: PROTOCOL_VERSION,
+                cursor: current_cursor,
+                has_more: false,
+                objects: Vec::new(),
+            });
+        }
+
+        let cursor = parse_cursor(request.cursor.as_deref())?;
+        let limit = normalized_limit(request.limit);
+        let mut stmt = self.conn.prepare(
+            "SELECT
+                server_seq, id, operation_id, device_id, object_id, object_revision,
+                object_type, operation_type, created_at, envelope
+             FROM sync_objects
+             WHERE server_seq > ?1
+             ORDER BY server_seq ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![cursor, limit + 1], row_to_sync_object)?;
+        let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = rows.len() > limit as usize;
+        if has_more {
+            rows.truncate(limit as usize);
+        }
+
+        let next_cursor = rows
+            .last()
+            .map(|row| row.server_seq.to_string())
+            .unwrap_or_else(|| current_cursor.clone());
+
+        Ok(PullResponse {
+            protocol_version: PROTOCOL_VERSION,
+            cursor: next_cursor,
+            has_more,
+            objects: rows.into_iter().map(|row| row.object).collect(),
+        })
+    }
+
     fn current_cursor(&self) -> Result<String> {
         let seq = self
             .conn
@@ -213,6 +255,7 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/server-info", get(server_info))
         .route("/v1/sync/push", axum::routing::post(sync_push))
+        .route("/v1/sync/pull", axum::routing::post(sync_pull))
         .with_state(state)
 }
 
@@ -248,6 +291,22 @@ async fn sync_push(
         .push(request)
         .map(Json)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
+
+async fn sync_pull(
+    State(state): State<AppState>,
+    Json(request): Json<PullRequest>,
+) -> Result<Json<PullResponse>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    store
+        .pull(request)
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))
 }
 
 fn parse_bool(value: &str, name: &str) -> Result<bool> {
@@ -295,6 +354,57 @@ fn insert_sync_object(conn: &Connection, object: &EncryptedSyncObject) -> Result
         ],
     )?;
     Ok(())
+}
+
+struct StoredSyncObject {
+    server_seq: i64,
+    object: EncryptedSyncObject,
+}
+
+fn row_to_sync_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSyncObject> {
+    let envelope = row.get::<_, String>(9)?;
+    Ok(StoredSyncObject {
+        server_seq: row.get(0)?,
+        object: EncryptedSyncObject {
+            id: parse_uuid(row.get::<_, String>(1)?)?,
+            operation_id: parse_uuid(row.get::<_, String>(2)?)?,
+            device_id: parse_uuid(row.get::<_, String>(3)?)?,
+            object_id: parse_uuid(row.get::<_, String>(4)?)?,
+            object_revision: row.get(5)?,
+            object_type: row.get(6)?,
+            operation_type: row.get(7)?,
+            created_at: parse_datetime(row.get::<_, String>(8)?)?,
+            envelope: serde_json::from_str(&envelope).map_err(to_sql_error)?,
+        },
+    })
+}
+
+fn parse_cursor(cursor: Option<&str>) -> Result<i64> {
+    match cursor {
+        Some(cursor) if !cursor.trim().is_empty() => cursor
+            .parse::<i64>()
+            .with_context(|| format!("invalid sync cursor: {cursor}")),
+        _ => Ok(0),
+    }
+}
+
+fn normalized_limit(limit: u32) -> i64 {
+    let limit = if limit == 0 { 1 } else { limit };
+    i64::from(limit.min(500))
+}
+
+fn parse_uuid(value: String) -> rusqlite::Result<Uuid> {
+    Uuid::parse_str(&value).map_err(to_sql_error)
+}
+
+fn parse_datetime(value: String) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&value)
+        .map(|date| date.with_timezone(&Utc))
+        .map_err(to_sql_error)
+}
+
+fn to_sql_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
 #[cfg(test)]
@@ -356,7 +466,11 @@ mod tests {
         assert_eq!(info.protocol_version, PROTOCOL_VERSION);
         assert_eq!(
             info.capabilities,
-            vec![ServerCapability::ObjectSync, ServerCapability::BatchPush]
+            vec![
+                ServerCapability::ObjectSync,
+                ServerCapability::BatchPush,
+                ServerCapability::CursorPull
+            ]
         );
     }
 
@@ -372,7 +486,11 @@ mod tests {
         assert_eq!(response.protocol_version, PROTOCOL_VERSION);
         assert_eq!(
             response.capabilities,
-            vec![ServerCapability::ObjectSync, ServerCapability::BatchPush]
+            vec![
+                ServerCapability::ObjectSync,
+                ServerCapability::BatchPush,
+                ServerCapability::CursorPull
+            ]
         );
     }
 
@@ -435,6 +553,79 @@ mod tests {
         );
         assert_eq!(response.cursor, "0");
         assert_eq!(store.count_sync_objects().unwrap(), 0);
+    }
+
+    #[test]
+    fn pulls_sync_objects_after_cursor_with_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
+        let first = test_sync_object();
+        let second = test_sync_object();
+
+        store
+            .push(PushRequest {
+                protocol_version: PROTOCOL_VERSION,
+                device_id: first.device_id,
+                base_cursor: None,
+                objects: vec![first.clone(), second.clone()],
+            })
+            .unwrap();
+
+        let response = store
+            .pull(PullRequest {
+                protocol_version: PROTOCOL_VERSION,
+                device_id: Uuid::new_v4(),
+                cursor: None,
+                limit: 1,
+            })
+            .unwrap();
+
+        assert_eq!(response.objects.len(), 1);
+        assert_eq!(response.objects[0].operation_id, first.operation_id);
+        assert_eq!(response.cursor, "1");
+        assert!(response.has_more);
+
+        let response = store
+            .pull(PullRequest {
+                protocol_version: PROTOCOL_VERSION,
+                device_id: Uuid::new_v4(),
+                cursor: Some(response.cursor),
+                limit: 10,
+            })
+            .unwrap();
+
+        assert_eq!(response.objects.len(), 1);
+        assert_eq!(response.objects[0].operation_id, second.operation_id);
+        assert_eq!(response.cursor, "2");
+        assert!(!response.has_more);
+    }
+
+    #[test]
+    fn unsupported_pull_protocol_returns_empty_current_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
+        let object = test_sync_object();
+        store
+            .push(PushRequest {
+                protocol_version: PROTOCOL_VERSION,
+                device_id: object.device_id,
+                base_cursor: None,
+                objects: vec![object],
+            })
+            .unwrap();
+
+        let response = store
+            .pull(PullRequest {
+                protocol_version: PROTOCOL_VERSION + 1,
+                device_id: Uuid::new_v4(),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap();
+
+        assert!(response.objects.is_empty());
+        assert_eq!(response.cursor, "1");
+        assert!(!response.has_more);
     }
 
     fn test_sync_object() -> EncryptedSyncObject {

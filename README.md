@@ -75,6 +75,7 @@ Available server endpoints:
 GET /healthz
 GET /v1/server-info
 POST /v1/sync/push
+POST /v1/sync/pull
 ```
 
 Server environment variables:
@@ -276,6 +277,6 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 ## Current Limitations
 
 - No remote sync yet.
-- Server has `/healthz`, `/v1/server-info`, and unauthenticated `/v1/sync/push` blind-object storage; account auth and pull sync are not implemented yet.
+- Server has `/healthz`, `/v1/server-info`, unauthenticated `/v1/sync/push` blind-object storage, and unauthenticated cursor-based `/v1/sync/pull`; account auth is not implemented yet.
 - OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log; `ltd sync ack` is a local dry-run helper, not a real server acknowledgement.

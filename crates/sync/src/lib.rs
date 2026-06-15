@@ -30,7 +30,11 @@ impl ServerInfo {
     pub fn minimal() -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
-            capabilities: vec![ServerCapability::ObjectSync, ServerCapability::BatchPush],
+            capabilities: vec![
+                ServerCapability::ObjectSync,
+                ServerCapability::BatchPush,
+                ServerCapability::CursorPull,
+            ],
             limits: ServerLimits::default(),
         }
     }
@@ -267,6 +271,7 @@ mod tests {
         assert_eq!(json["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(json["capabilities"][0], "object_sync");
         assert_eq!(json["capabilities"][1], "batch_push");
+        assert_eq!(json["capabilities"][2], "cursor_pull");
         assert_eq!(json["limits"]["max_push_objects"], 500);
 
         let pull = PullRequest {
