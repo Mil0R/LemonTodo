@@ -2,8 +2,11 @@ use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDate, Utc};
-use lemontodo_core::{List, NewTask, Task, TaskStatus, TodoSnapshot};
+use lemontodo_core::{
+    List, NewTask, ObjectType, Operation, OperationType, Task, TaskStatus, TodoSnapshot,
+};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::json;
 use uuid::Uuid;
 
 pub struct TodoStore {
@@ -65,6 +68,13 @@ impl TodoStore {
                 task.updated_at.to_rfc3339(),
                 task.deleted_at.map(|date| date.to_rfc3339()),
             ],
+        )?;
+
+        self.record_operation(
+            task.id,
+            ObjectType::Task,
+            OperationType::Create,
+            json!({ "task": task }),
         )?;
 
         Ok(task)
@@ -158,7 +168,25 @@ impl TodoStore {
 
         tx.commit()?;
         self.ensure_inbox()?;
+        self.record_operation(
+            Uuid::new_v4(),
+            ObjectType::Snapshot,
+            OperationType::ImportSnapshot,
+            json!({ "imported_at": Utc::now() }),
+        )?;
         Ok(())
+    }
+
+    pub fn pending_operations(&self) -> Result<Vec<Operation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, object_id, object_type, operation_type, payload, created_at, synced_at
+             FROM operations
+             WHERE synced_at IS NULL
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], row_to_operation)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list pending operations")
     }
 
     pub fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
@@ -264,11 +292,19 @@ impl TodoStore {
             params![title, now.to_rfc3339(), task.id.to_string()],
         )?;
 
-        Ok(Task {
+        let updated = Task {
             title: title.to_owned(),
             updated_at: now,
             ..task
-        })
+        };
+        self.record_operation(
+            updated.id,
+            ObjectType::Task,
+            OperationType::Update,
+            json!({ "task": updated }),
+        )?;
+
+        Ok(updated)
     }
 
     pub fn update_task_note(&self, id_prefix: &str, note_markdown: &str) -> Result<Task> {
@@ -284,11 +320,19 @@ impl TodoStore {
             params![note_markdown, now.to_rfc3339(), task.id.to_string()],
         )?;
 
-        Ok(Task {
+        let updated = Task {
             note_markdown: note_markdown.to_owned(),
             updated_at: now,
             ..task
-        })
+        };
+        self.record_operation(
+            updated.id,
+            ObjectType::Task,
+            OperationType::Update,
+            json!({ "task": updated }),
+        )?;
+
+        Ok(updated)
     }
 
     pub fn update_task_due_date(
@@ -316,11 +360,19 @@ impl TodoStore {
             ],
         )?;
 
-        Ok(Task {
+        let updated = Task {
             due_date,
             updated_at: now,
             ..task
-        })
+        };
+        self.record_operation(
+            updated.id,
+            ObjectType::Task,
+            OperationType::Update,
+            json!({ "task": updated }),
+        )?;
+
+        Ok(updated)
     }
 
     pub fn update_task_tags(&self, id_prefix: &str, tags: Vec<String>) -> Result<Task> {
@@ -341,11 +393,19 @@ impl TodoStore {
             ],
         )?;
 
-        Ok(Task {
+        let updated = Task {
             tags,
             updated_at: now,
             ..task
-        })
+        };
+        self.record_operation(
+            updated.id,
+            ObjectType::Task,
+            OperationType::Update,
+            json!({ "task": updated }),
+        )?;
+
+        Ok(updated)
     }
 
     fn set_task_status(&self, task: Task, status: TaskStatus) -> Result<Task> {
@@ -355,11 +415,59 @@ impl TodoStore {
             params![status.as_str(), now.to_rfc3339(), task.id.to_string()],
         )?;
 
-        Ok(Task {
+        let updated = Task {
             status,
             updated_at: now,
             ..task
-        })
+        };
+        let operation_type = if updated.status == TaskStatus::Archived {
+            OperationType::Archive
+        } else {
+            OperationType::Update
+        };
+        self.record_operation(
+            updated.id,
+            ObjectType::Task,
+            operation_type,
+            json!({ "task": updated }),
+        )?;
+
+        Ok(updated)
+    }
+
+    fn record_operation(
+        &self,
+        object_id: Uuid,
+        object_type: ObjectType,
+        operation_type: OperationType,
+        payload: serde_json::Value,
+    ) -> Result<Operation> {
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            object_id,
+            object_type,
+            operation_type,
+            payload,
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        self.conn.execute(
+            "INSERT INTO operations (
+                id, object_id, object_type, operation_type, payload, created_at, synced_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                operation.id.to_string(),
+                operation.object_id.to_string(),
+                operation.object_type.as_str(),
+                operation.operation_type.as_str(),
+                serde_json::to_string(&operation.payload)?,
+                operation.created_at.to_rfc3339(),
+                operation.synced_at.map(|date| date.to_rfc3339()),
+            ],
+        )?;
+
+        Ok(operation)
     }
 
     fn migrate(&self) -> Result<()> {
@@ -502,6 +610,27 @@ fn row_to_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<List> {
     })
 }
 
+fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
+    let object_type = row.get::<_, String>(2)?;
+    let operation_type = row.get::<_, String>(3)?;
+    let payload = row.get::<_, String>(4)?;
+    let synced_at = row.get::<_, Option<String>>(6)?;
+
+    Ok(Operation {
+        id: parse_uuid(row.get::<_, String>(0)?)?,
+        object_id: parse_uuid(row.get::<_, String>(1)?)?,
+        object_type: ObjectType::try_from(object_type.as_str()).map_err(|error| {
+            to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?,
+        operation_type: OperationType::try_from(operation_type.as_str()).map_err(|error| {
+            to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?,
+        payload: serde_json::from_str(&payload).map_err(to_sql_error)?,
+        created_at: parse_datetime(row.get::<_, String>(5)?)?,
+        synced_at: synced_at.map(parse_datetime).transpose()?,
+    })
+}
+
 fn select_task_sql() -> &'static str {
     "SELECT id, list_id, title, note_markdown, status, tags, due_date,
             sort_key, created_at, updated_at, deleted_at
@@ -574,6 +703,7 @@ mod tests {
 
         let task = store.add_task(NewTask::new("Ship MVP")).unwrap();
         assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(store.pending_operations().unwrap().len(), 1);
 
         let open_tasks = store.list_tasks(false).unwrap();
         assert_eq!(open_tasks.len(), 1);
@@ -616,6 +746,15 @@ mod tests {
         let archived = store.archive_task_by_id(task.id).unwrap();
         assert_eq!(archived.status, TaskStatus::Archived);
         assert!(store.list_tasks(true).unwrap().is_empty());
+
+        let operations = store.pending_operations().unwrap();
+        assert!(operations.len() >= 7);
+        assert_eq!(operations[0].operation_type, OperationType::Create);
+        assert!(
+            operations
+                .iter()
+                .any(|operation| operation.operation_type == OperationType::Archive)
+        );
     }
 
     #[test]
@@ -639,5 +778,10 @@ mod tests {
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].title, "Export me");
         assert_eq!(imported[0].note_markdown, "Snapshot note");
+        assert_eq!(target.pending_operations().unwrap().len(), 1);
+        assert_eq!(
+            target.pending_operations().unwrap()[0].operation_type,
+            OperationType::ImportSnapshot
+        );
     }
 }

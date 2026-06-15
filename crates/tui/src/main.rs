@@ -76,6 +76,8 @@ enum Command {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
+    /// Inspect pending local operations for future sync.
+    Ops,
     /// Archive a task by id prefix.
     Archive { id: String },
 }
@@ -172,6 +174,22 @@ fn main() -> Result<()> {
             let mut store = store;
             store.import_snapshot(snapshot)?;
             println!("Imported LemonTodo snapshot from {}", path.display());
+        }
+        Some(Command::Ops) => {
+            let operations = store.pending_operations()?;
+            if operations.is_empty() {
+                println!("No pending operations");
+            } else {
+                for operation in operations {
+                    println!(
+                        "{} {} {} {}",
+                        short_id(&operation.id.to_string()),
+                        operation.object_type.as_str(),
+                        operation.operation_type.as_str(),
+                        operation.object_id
+                    );
+                }
+            }
         }
         Some(Command::Archive { id }) => {
             let task = store.archive_task(&id)?;

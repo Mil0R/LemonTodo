@@ -76,6 +76,82 @@ pub struct TodoSnapshot {
     pub tasks: Vec<Task>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Operation {
+    pub id: Uuid,
+    pub object_id: Uuid,
+    pub object_type: ObjectType,
+    pub operation_type: OperationType,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub synced_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectType {
+    Task,
+    List,
+    Snapshot,
+}
+
+impl ObjectType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::List => "list",
+            Self::Snapshot => "snapshot",
+        }
+    }
+}
+
+impl TryFrom<&str> for ObjectType {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "task" => Ok(Self::Task),
+            "list" => Ok(Self::List),
+            "snapshot" => Ok(Self::Snapshot),
+            other => Err(format!("unknown object type: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationType {
+    Create,
+    Update,
+    Archive,
+    ImportSnapshot,
+}
+
+impl OperationType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Archive => "archive",
+            Self::ImportSnapshot => "import_snapshot",
+        }
+    }
+}
+
+impl TryFrom<&str> for OperationType {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "create" => Ok(Self::Create),
+            "update" => Ok(Self::Update),
+            "archive" => Ok(Self::Archive),
+            "import_snapshot" => Ok(Self::ImportSnapshot),
+            other => Err(format!("unknown operation type: {other}")),
+        }
+    }
+}
+
 impl TodoSnapshot {
     pub const CURRENT_VERSION: u32 = 1;
 
