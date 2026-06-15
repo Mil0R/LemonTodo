@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::NaiveDate;
 use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_storage::TodoStore;
 
@@ -16,7 +17,10 @@ pub struct App {
 pub enum Mode {
     Browse,
     Add,
-    Edit,
+    EditTitle,
+    EditNote,
+    EditDue,
+    EditTags,
     Search,
 }
 
@@ -91,14 +95,47 @@ impl App {
         self.message = "Add task".to_owned();
     }
 
-    pub fn start_edit(&mut self) {
+    pub fn start_edit_title(&mut self) {
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
         };
         self.input = task.title.clone();
-        self.mode = Mode::Edit;
-        self.message = "Edit task".to_owned();
+        self.mode = Mode::EditTitle;
+        self.message = "Edit title".to_owned();
+    }
+
+    pub fn start_edit_note(&mut self) {
+        let Some(task) = self.selected_task() else {
+            self.message = "No task selected".to_owned();
+            return;
+        };
+        self.input = task.note_markdown.clone();
+        self.mode = Mode::EditNote;
+        self.message = "Edit note".to_owned();
+    }
+
+    pub fn start_edit_due(&mut self) {
+        let Some(task) = self.selected_task() else {
+            self.message = "No task selected".to_owned();
+            return;
+        };
+        self.input = task
+            .due_date
+            .map(|date| date.to_string())
+            .unwrap_or_default();
+        self.mode = Mode::EditDue;
+        self.message = "Edit due date as YYYY-MM-DD, empty clears".to_owned();
+    }
+
+    pub fn start_edit_tags(&mut self) {
+        let Some(task) = self.selected_task() else {
+            self.message = "No task selected".to_owned();
+            return;
+        };
+        self.input = task.tags.join(" ");
+        self.mode = Mode::EditTags;
+        self.message = "Edit tags separated by spaces or commas".to_owned();
     }
 
     pub fn start_search(&mut self) {
@@ -131,7 +168,10 @@ impl App {
         match self.mode {
             Mode::Browse => {}
             Mode::Add => self.submit_add()?,
-            Mode::Edit => self.submit_edit()?,
+            Mode::EditTitle => self.submit_edit_title()?,
+            Mode::EditNote => self.submit_edit_note()?,
+            Mode::EditDue => self.submit_edit_due()?,
+            Mode::EditTags => self.submit_edit_tags()?,
             Mode::Search => self.submit_search()?,
         }
         Ok(())
@@ -179,7 +219,7 @@ impl App {
         Ok(())
     }
 
-    fn submit_edit(&mut self) -> Result<()> {
+    fn submit_edit_title(&mut self) -> Result<()> {
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             self.mode = Mode::Browse;
@@ -189,6 +229,66 @@ impl App {
 
         let updated = self.store.update_task_title_by_id(task.id, &self.input)?;
         self.message = format!("Updated {}", updated.title);
+        self.input.clear();
+        self.mode = Mode::Browse;
+        self.refresh()?;
+        self.select_task(updated.id);
+        Ok(())
+    }
+
+    fn submit_edit_note(&mut self) -> Result<()> {
+        let Some(task) = self.selected_task() else {
+            self.message = "No task selected".to_owned();
+            self.mode = Mode::Browse;
+            self.input.clear();
+            return Ok(());
+        };
+
+        let updated = self.store.update_task_note_by_id(task.id, &self.input)?;
+        self.message = format!("Updated note for {}", updated.title);
+        self.input.clear();
+        self.mode = Mode::Browse;
+        self.refresh()?;
+        self.select_task(updated.id);
+        Ok(())
+    }
+
+    fn submit_edit_due(&mut self) -> Result<()> {
+        let Some(task) = self.selected_task() else {
+            self.message = "No task selected".to_owned();
+            self.mode = Mode::Browse;
+            self.input.clear();
+            return Ok(());
+        };
+
+        let due_date = parse_due_input(&self.input)?;
+        let updated = self.store.update_task_due_date_by_id(task.id, due_date)?;
+        self.message = match updated.due_date {
+            Some(date) => format!("Updated due date for {} to {date}", updated.title),
+            None => format!("Cleared due date for {}", updated.title),
+        };
+        self.input.clear();
+        self.mode = Mode::Browse;
+        self.refresh()?;
+        self.select_task(updated.id);
+        Ok(())
+    }
+
+    fn submit_edit_tags(&mut self) -> Result<()> {
+        let Some(task) = self.selected_task() else {
+            self.message = "No task selected".to_owned();
+            self.mode = Mode::Browse;
+            self.input.clear();
+            return Ok(());
+        };
+
+        let tags = parse_tags_input(&self.input);
+        let updated = self.store.update_task_tags_by_id(task.id, tags)?;
+        self.message = if updated.tags.is_empty() {
+            format!("Cleared tags for {}", updated.title)
+        } else {
+            format!("Updated tags for {}", updated.title)
+        };
         self.input.clear();
         self.mode = Mode::Browse;
         self.refresh()?;
@@ -223,4 +323,24 @@ impl App {
             self.selected = self.tasks.len() - 1;
         }
     }
+}
+
+pub fn parse_due_input(input: &str) -> Result<Option<NaiveDate>> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(None);
+    }
+
+    NaiveDate::parse_from_str(input, "%Y-%m-%d")
+        .map(Some)
+        .with_context(|| format!("invalid due date '{input}', expected YYYY-MM-DD"))
+}
+
+pub fn parse_tags_input(input: &str) -> Vec<String> {
+    input
+        .split(|value: char| value == ',' || value.is_whitespace())
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }

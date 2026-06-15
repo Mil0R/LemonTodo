@@ -160,6 +160,83 @@ impl TodoStore {
         })
     }
 
+    pub fn update_task_note(&self, id_prefix: &str, note_markdown: &str) -> Result<Task> {
+        let task = self.find_task_by_prefix(id_prefix)?;
+        self.update_task_note_by_id(task.id, note_markdown)
+    }
+
+    pub fn update_task_note_by_id(&self, id: Uuid, note_markdown: &str) -> Result<Task> {
+        let task = self.find_task_by_id(id)?;
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE tasks SET note_markdown = ?1, updated_at = ?2 WHERE id = ?3",
+            params![note_markdown, now.to_rfc3339(), task.id.to_string()],
+        )?;
+
+        Ok(Task {
+            note_markdown: note_markdown.to_owned(),
+            updated_at: now,
+            ..task
+        })
+    }
+
+    pub fn update_task_due_date(
+        &self,
+        id_prefix: &str,
+        due_date: Option<NaiveDate>,
+    ) -> Result<Task> {
+        let task = self.find_task_by_prefix(id_prefix)?;
+        self.update_task_due_date_by_id(task.id, due_date)
+    }
+
+    pub fn update_task_due_date_by_id(
+        &self,
+        id: Uuid,
+        due_date: Option<NaiveDate>,
+    ) -> Result<Task> {
+        let task = self.find_task_by_id(id)?;
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE tasks SET due_date = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                due_date.map(|date| date.to_string()),
+                now.to_rfc3339(),
+                task.id.to_string()
+            ],
+        )?;
+
+        Ok(Task {
+            due_date,
+            updated_at: now,
+            ..task
+        })
+    }
+
+    pub fn update_task_tags(&self, id_prefix: &str, tags: Vec<String>) -> Result<Task> {
+        let task = self.find_task_by_prefix(id_prefix)?;
+        self.update_task_tags_by_id(task.id, tags)
+    }
+
+    pub fn update_task_tags_by_id(&self, id: Uuid, tags: Vec<String>) -> Result<Task> {
+        let task = self.find_task_by_id(id)?;
+        let tags = normalize_tags(tags);
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE tasks SET tags = ?1, updated_at = ?2 WHERE id = ?3",
+            params![
+                serde_json::to_string(&tags)?,
+                now.to_rfc3339(),
+                task.id.to_string()
+            ],
+        )?;
+
+        Ok(Task {
+            tags,
+            updated_at: now,
+            ..task
+        })
+    }
+
     fn set_task_status(&self, task: Task, status: TaskStatus) -> Result<Task> {
         let now = Utc::now();
         self.conn.execute(
@@ -391,6 +468,24 @@ mod tests {
             .unwrap();
         assert_eq!(edited.title, "Ship edited MVP");
         assert_eq!(store.search_tasks("edited").unwrap().len(), 1);
+
+        let noted = store
+            .update_task_note_by_id(task.id, "Review sync protocol")
+            .unwrap();
+        assert_eq!(noted.note_markdown, "Review sync protocol");
+        assert_eq!(store.search_tasks("protocol").unwrap().len(), 1);
+
+        let due_date = NaiveDate::from_ymd_opt(2026, 6, 30).unwrap();
+        let scheduled = store
+            .update_task_due_date_by_id(task.id, Some(due_date))
+            .unwrap();
+        assert_eq!(scheduled.due_date, Some(due_date));
+
+        let tagged = store
+            .update_task_tags_by_id(task.id, vec!["MVP".to_owned(), "#mvp".to_owned()])
+            .unwrap();
+        assert_eq!(tagged.tags, vec!["mvp"]);
+        assert_eq!(store.search_tasks("mvp").unwrap().len(), 1);
 
         let archived = store.archive_task_by_id(task.id).unwrap();
         assert_eq!(archived.status, TaskStatus::Archived);

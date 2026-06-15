@@ -41,13 +41,16 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 }
 
 fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let search = if app.search_query().is_empty() {
-        Span::raw("")
+    let help = if area.width < 100 {
+        "a add e edit n note d due t tags / find x archive q quit"
     } else {
-        Span::styled(
-            format!("  filter: {}", app.search_query()),
-            Style::default().fg(Color::Green),
-        )
+        "a add  e edit  n note  d due  t tags  / search  c clear  x archive  space toggle  j/k move  q quit"
+    };
+
+    let search = if app.search_query().is_empty() {
+        String::new()
+    } else {
+        format!("  filter: {}", app.search_query())
     };
 
     let title = Paragraph::new(Line::from(vec![
@@ -58,11 +61,8 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(
-            "a add  e edit  / search  c clear  x archive  space toggle  j/k move  q quit",
-            Style::default().fg(Color::DarkGray),
-        ),
-        search,
+        Span::styled(help, Style::default().fg(Color::DarkGray)),
+        Span::styled(search, Style::default().fg(Color::Green)),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, area);
@@ -100,7 +100,10 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             .block(Block::default().borders(Borders::ALL))
             .wrap(Wrap { trim: true }),
         Mode::Add => input_footer("New task", app.input()),
-        Mode::Edit => input_footer("Edit title", app.input()),
+        Mode::EditTitle => input_footer("Edit title", app.input()),
+        Mode::EditNote => input_footer("Edit note", app.input()),
+        Mode::EditDue => input_footer("Edit due YYYY-MM-DD, empty clears", app.input()),
+        Mode::EditTags => input_footer("Edit tags", app.input()),
         Mode::Search => input_footer("Search", app.input()),
     };
     frame.render_widget(footer, area);

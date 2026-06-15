@@ -33,6 +33,10 @@ cargo run -p lemontodo-tui -- add "Ship local MVP" --tag mvp --due 2026-06-30
 cargo run -p lemontodo-tui -- list --all
 cargo run -p lemontodo-tui -- search "mvp"
 cargo run -p lemontodo-tui -- edit <task-id-prefix> "Ship edited MVP"
+cargo run -p lemontodo-tui -- note <task-id-prefix> "Markdown note"
+cargo run -p lemontodo-tui -- due <task-id-prefix> 2026-06-30
+cargo run -p lemontodo-tui -- due <task-id-prefix>
+cargo run -p lemontodo-tui -- tags <task-id-prefix> mvp terminal
 cargo run -p lemontodo-tui -- done <task-id-prefix>
 cargo run -p lemontodo-tui -- archive <task-id-prefix>
 ```
@@ -52,6 +56,9 @@ Initial TUI controls:
 - `space`: toggle selected task done/open
 - `a`: add a task
 - `e`: edit selected task title
+- `n`: edit selected task note
+- `d`: edit selected task due date
+- `t`: edit selected task tags
 - `/`: search tasks
 - `c`: clear search
 - `x`: archive selected task

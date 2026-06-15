@@ -16,7 +16,7 @@ use lemontodo_storage::TodoStore;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
-    app::{App, Mode},
+    app::{App, Mode, parse_due_input},
     ui::draw,
 };
 
@@ -56,6 +56,16 @@ enum Command {
     Done { id: String },
     /// Edit a task title by id prefix.
     Edit { id: String, title: String },
+    /// Edit a task note by id prefix.
+    Note { id: String, note: String },
+    /// Set or clear a task due date by id prefix.
+    Due {
+        id: String,
+        #[arg(value_name = "YYYY-MM-DD")]
+        date: Option<String>,
+    },
+    /// Replace task tags by id prefix.
+    Tags { id: String, tags: Vec<String> },
     /// Archive a task by id prefix.
     Archive { id: String },
 }
@@ -100,6 +110,38 @@ fn main() -> Result<()> {
         Some(Command::Edit { id, title }) => {
             let task = store.update_task_title(&id, &title)?;
             println!("Updated {} {}", short_id(&task.id.to_string()), task.title);
+        }
+        Some(Command::Note { id, note }) => {
+            let task = store.update_task_note(&id, &note)?;
+            println!(
+                "Updated note for {} {}",
+                short_id(&task.id.to_string()),
+                task.title
+            );
+        }
+        Some(Command::Due { id, date }) => {
+            let due_date = parse_due_input(date.as_deref().unwrap_or_default())?;
+            let task = store.update_task_due_date(&id, due_date)?;
+            match task.due_date {
+                Some(date) => println!(
+                    "Updated due date for {} {} to {date}",
+                    short_id(&task.id.to_string()),
+                    task.title
+                ),
+                None => println!(
+                    "Cleared due date for {} {}",
+                    short_id(&task.id.to_string()),
+                    task.title
+                ),
+            }
+        }
+        Some(Command::Tags { id, tags }) => {
+            let task = store.update_task_tags(&id, tags)?;
+            println!(
+                "Updated tags for {} {}",
+                short_id(&task.id.to_string()),
+                task.title
+            );
         }
         Some(Command::Archive { id }) => {
             let task = store.archive_task(&id)?;
@@ -154,7 +196,10 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
             KeyCode::Char('k') | KeyCode::Up => app.move_up(),
             KeyCode::Char(' ') => app.toggle_selected()?,
             KeyCode::Char('a') => app.start_add(),
-            KeyCode::Char('e') => app.start_edit(),
+            KeyCode::Char('e') => app.start_edit_title(),
+            KeyCode::Char('n') => app.start_edit_note(),
+            KeyCode::Char('d') => app.start_edit_due(),
+            KeyCode::Char('t') => app.start_edit_tags(),
             KeyCode::Char('/') => app.start_search(),
             KeyCode::Char('c') => app.clear_search()?,
             KeyCode::Char('x') => app.archive_selected()?,
@@ -163,7 +208,12 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
             }
             _ => {}
         },
-        Mode::Add | Mode::Edit | Mode::Search => match key.code {
+        Mode::Add
+        | Mode::EditTitle
+        | Mode::EditNote
+        | Mode::EditDue
+        | Mode::EditTags
+        | Mode::Search => match key.code {
             KeyCode::Esc => app.cancel_input(),
             KeyCode::Enter => app.submit_input()?,
             KeyCode::Backspace => app.pop_input(),
