@@ -38,6 +38,8 @@ enum Command {
     /// Add a task to Inbox.
     Add {
         title: String,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
         #[arg(long, short = 'n')]
         note: Option<String>,
         #[arg(long, short = 't')]
@@ -49,6 +51,13 @@ enum Command {
     List {
         #[arg(long)]
         all: bool,
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+    },
+    /// Manage projects.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
     },
     /// Search tasks locally.
     Search { query: String },
@@ -66,6 +75,8 @@ enum Command {
     },
     /// Replace task tags by id prefix.
     Tags { id: String, tags: Vec<String> },
+    /// Move a task to a project by id prefix.
+    Move { id: String, project: String },
     /// Export local data as JSON snapshot.
     Export {
         #[arg(value_name = "PATH")]
@@ -82,6 +93,14 @@ enum Command {
     Archive { id: String },
 }
 
+#[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    /// Create a project.
+    Add { name: String },
+    /// List projects.
+    List,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let db_path = cli.db.unwrap_or_else(default_db_path);
@@ -93,6 +112,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Add {
             title,
+            project,
             note,
             tag,
             due,
@@ -102,12 +122,27 @@ fn main() -> Result<()> {
             task.tags = tag;
             task.due_date = due;
 
-            let task = store.add_task(task)?;
+            let task = store.add_task_to_project(task, project.as_deref())?;
             println!("Added {} {}", short_id(&task.id.to_string()), task.title);
         }
-        Some(Command::List { all }) => {
-            print_tasks(store.list_tasks(all)?)?;
+        Some(Command::List { all, project }) => {
+            print_tasks(store.list_tasks_for_project(all, project.as_deref())?)?;
         }
+        Some(Command::Project { command }) => match command {
+            ProjectCommand::Add { name } => {
+                let project = store.create_project(&name)?;
+                println!(
+                    "Project {} {}",
+                    short_id(&project.id.to_string()),
+                    project.name
+                );
+            }
+            ProjectCommand::List => {
+                for project in store.projects()? {
+                    println!("{} {}", short_id(&project.id.to_string()), project.name);
+                }
+            }
+        },
         Some(Command::Search { query }) => {
             print_tasks(store.search_tasks(&query)?)?;
         }
@@ -153,6 +188,15 @@ fn main() -> Result<()> {
                 "Updated tags for {} {}",
                 short_id(&task.id.to_string()),
                 task.title
+            );
+        }
+        Some(Command::Move { id, project }) => {
+            let task = store.move_task_to_project(&id, &project)?;
+            println!(
+                "Moved {} {} to {}",
+                short_id(&task.id.to_string()),
+                task.title,
+                project
             );
         }
         Some(Command::Export { path }) => {

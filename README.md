@@ -88,8 +88,11 @@ Run a subcommand during development:
 
 ```bash
 cargo run -p lemontodo-tui -- init
-cargo run -p lemontodo-tui -- add "Ship local MVP" --tag mvp --due 2026-06-30
+cargo run -p lemontodo-tui -- project add LemonTodo
+cargo run -p lemontodo-tui -- project list
+cargo run -p lemontodo-tui -- add "Ship local MVP" --project LemonTodo --tag mvp --due 2026-06-30
 cargo run -p lemontodo-tui -- list --all
+cargo run -p lemontodo-tui -- list --project LemonTodo --all
 cargo run -p lemontodo-tui -- search "mvp"
 cargo run -p lemontodo-tui -- edit <task-id-prefix> "Ship edited MVP"
 cargo run -p lemontodo-tui -- note <task-id-prefix> "Markdown note"
@@ -99,6 +102,7 @@ cargo run -p lemontodo-tui -- tags <task-id-prefix> mvp terminal
 cargo run -p lemontodo-tui -- export ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- import ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- ops
+cargo run -p lemontodo-tui -- move <task-id-prefix> LemonTodo
 cargo run -p lemontodo-tui -- done <task-id-prefix>
 cargo run -p lemontodo-tui -- archive <task-id-prefix>
 ```
@@ -114,8 +118,11 @@ ltd
 Common CLI commands:
 
 ```bash
-ltd add "Fix sync protocol notes" --tag sync --due 2026-06-30
+ltd project add LemonTodo
+ltd project list
+ltd add "Fix sync protocol notes" --project LemonTodo --tag sync --due 2026-06-30
 ltd list --all
+ltd list --project LemonTodo --all
 ltd search sync
 ltd edit <task-id-prefix> "Fix encrypted sync protocol notes"
 ltd note <task-id-prefix> "Markdown note"
@@ -127,6 +134,7 @@ ltd archive <task-id-prefix>
 ltd export ./lemontodo.snapshot.json
 ltd import ./lemontodo.snapshot.json
 ltd ops
+ltd move <task-id-prefix> LemonTodo
 ```
 
 TUI controls:

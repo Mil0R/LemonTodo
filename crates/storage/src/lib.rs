@@ -30,15 +30,27 @@ impl TodoStore {
     }
 
     pub fn add_task(&self, new_task: NewTask) -> Result<Task> {
+        self.add_task_to_project(new_task, None)
+    }
+
+    pub fn add_task_to_project(
+        &self,
+        new_task: NewTask,
+        project_name: Option<&str>,
+    ) -> Result<Task> {
         let title = new_task.title.trim();
         if title.is_empty() {
             bail!("task title cannot be empty");
         }
 
+        let list_id = match project_name {
+            Some(project_name) => self.find_project_by_name(project_name)?.id,
+            None => self.inbox_id()?,
+        };
         let now = Utc::now();
         let task = Task {
             id: Uuid::new_v4(),
-            list_id: self.inbox_id()?,
+            list_id,
             title: title.to_owned(),
             note_markdown: new_task.note_markdown,
             status: TaskStatus::Open,
@@ -78,6 +90,42 @@ impl TodoStore {
         )?;
 
         Ok(task)
+    }
+
+    pub fn create_project(&self, name: &str) -> Result<List> {
+        let name = normalize_project_name(name)?;
+        if let Some(existing) = self.find_list_by_name(&name)? {
+            return Ok(existing);
+        }
+
+        let now = Utc::now();
+        let project = List {
+            id: Uuid::new_v4(),
+            name,
+            created_at: now,
+            updated_at: now,
+        };
+        self.conn.execute(
+            "INSERT INTO lists (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                project.id.to_string(),
+                project.name,
+                project.created_at.to_rfc3339(),
+                project.updated_at.to_rfc3339(),
+            ],
+        )?;
+        self.record_operation(
+            project.id,
+            ObjectType::List,
+            OperationType::Create,
+            json!({ "list": project }),
+        )?;
+
+        Ok(project)
+    }
+
+    pub fn projects(&self) -> Result<Vec<List>> {
+        self.list_lists()
     }
 
     pub fn export_snapshot(&self) -> Result<TodoSnapshot> {
@@ -190,18 +238,41 @@ impl TodoStore {
     }
 
     pub fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
-        let sql = format!(
-            "{} WHERE {} ORDER BY status = 'done', sort_key ASC",
-            select_task_sql(),
-            if include_done {
-                "deleted_at IS NULL AND status != 'archived'"
-            } else {
-                "deleted_at IS NULL AND status = 'open'"
-            }
-        );
+        self.list_tasks_for_project(include_done, None)
+    }
 
+    pub fn list_tasks_for_project(
+        &self,
+        include_done: bool,
+        project_name: Option<&str>,
+    ) -> Result<Vec<Task>> {
+        let status_filter = if include_done {
+            "deleted_at IS NULL AND status != 'archived'"
+        } else {
+            "deleted_at IS NULL AND status = 'open'"
+        };
+
+        let Some(project_name) = project_name else {
+            let sql = format!(
+                "{} WHERE {} ORDER BY status = 'done', sort_key ASC",
+                select_task_sql(),
+                status_filter
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map([], row_to_task)?;
+            return rows
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .context("failed to list tasks");
+        };
+
+        let project = self.find_project_by_name(project_name)?;
+        let sql = format!(
+            "{} WHERE {} AND list_id = ?1 ORDER BY status = 'done', sort_key ASC",
+            select_task_sql(),
+            status_filter
+        );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], row_to_task)?;
+        let rows = stmt.query_map(params![project.id.to_string()], row_to_task)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list tasks")
     }
@@ -248,6 +319,35 @@ impl TodoStore {
         let rows = stmt.query_map(params![pattern], row_to_task)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to search tasks")
+    }
+
+    pub fn move_task_to_project(&self, id_prefix: &str, project_name: &str) -> Result<Task> {
+        let task = self.find_task_by_prefix(id_prefix)?;
+        let project = self.find_project_by_name(project_name)?;
+        self.move_task_to_project_by_id(task.id, project.id)
+    }
+
+    pub fn move_task_to_project_by_id(&self, id: Uuid, list_id: Uuid) -> Result<Task> {
+        let task = self.find_task_by_id(id)?;
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE tasks SET list_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![list_id.to_string(), now.to_rfc3339(), task.id.to_string()],
+        )?;
+
+        let updated = Task {
+            list_id,
+            updated_at: now,
+            ..task
+        };
+        self.record_operation(
+            updated.id,
+            ObjectType::Task,
+            OperationType::Update,
+            json!({ "task": updated }),
+        )?;
+
+        Ok(updated)
     }
 
     pub fn mark_done(&self, id_prefix: &str) -> Result<Task> {
@@ -548,6 +648,12 @@ impl TodoStore {
             .context("Inbox list is missing")
     }
 
+    fn find_project_by_name(&self, name: &str) -> Result<List> {
+        let name = normalize_project_name(name)?;
+        self.find_list_by_name(&name)?
+            .with_context(|| format!("project not found: {name}"))
+    }
+
     fn find_list_by_name(&self, name: &str) -> Result<Option<List>> {
         self.conn
             .query_row(
@@ -678,6 +784,14 @@ fn normalize_tags(tags: Vec<String>) -> Vec<String> {
     tags
 }
 
+fn normalize_project_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("project name cannot be empty");
+    }
+    Ok(name.to_owned())
+}
+
 fn parse_uuid(value: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&value).map_err(to_sql_error)
 }
@@ -782,6 +896,47 @@ mod tests {
         assert_eq!(
             target.pending_operations().unwrap()[0].operation_type,
             OperationType::ImportSnapshot
+        );
+    }
+
+    #[test]
+    fn manages_projects_and_moves_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+
+        let project = store.create_project("LemonTodo").unwrap();
+        assert_eq!(project.name, "LemonTodo");
+        assert!(
+            store
+                .pending_operations()
+                .unwrap()
+                .iter()
+                .any(|operation| operation.object_type == ObjectType::List)
+        );
+
+        let task = store
+            .add_task_to_project(NewTask::new("Project task"), Some("LemonTodo"))
+            .unwrap();
+        assert_eq!(task.list_id, project.id);
+        assert_eq!(
+            store
+                .list_tasks_for_project(true, Some("LemonTodo"))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let inbox_task = store.add_task(NewTask::new("Inbox task")).unwrap();
+        let moved = store
+            .move_task_to_project(&inbox_task.id.to_string()[..8], "LemonTodo")
+            .unwrap();
+        assert_eq!(moved.list_id, project.id);
+        assert_eq!(
+            store
+                .list_tasks_for_project(true, Some("LemonTodo"))
+                .unwrap()
+                .len(),
+            2
         );
     }
 }
