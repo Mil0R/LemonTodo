@@ -1,0 +1,30 @@
+LemonTodo Software Licensing
+
+Source code in this repository is intended to follow a Bitwarden-style mixed
+licensing model:
+
+1. Client-side applications and client-side core code are licensed under the
+   GNU General Public License v3.0 only (GPL-3.0-only), unless a file or
+   directory states otherwise.
+
+2. Server-side code is licensed under the GNU Affero General Public License
+   v3.0 only (AGPL-3.0-only), unless a file or directory states otherwise.
+
+3. Selected future commercial or enterprise modules may be licensed under a
+   separate LemonTodo source-available commercial license. No such production
+   commercial module is included at project initialization.
+
+The GPLv3 and AGPLv3 are open source licenses and allow commercial use when
+their license obligations are satisfied.
+
+This license notice does not grant rights to use LemonTodo names, logos,
+service marks, or other trademarks except as required for accurate attribution.
+
+Canonical license texts:
+
+- GPL-3.0-only: https://www.gnu.org/licenses/gpl-3.0.txt
+- AGPL-3.0-only: https://www.gnu.org/licenses/agpl-3.0.txt
+
+Before the first public release, replace this summary with reviewed license
+files and per-package SPDX headers.
+
