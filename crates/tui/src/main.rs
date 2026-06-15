@@ -418,7 +418,7 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
         Mode::Browse => match key.code {
             KeyCode::Esc if app.help_visible() => app.hide_help(),
             KeyCode::Char('?') => app.toggle_help(),
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+            KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => app.move_down(),
             KeyCode::Char('k') | KeyCode::Up => app.move_up(),
             KeyCode::Char('[') => app.previous_project()?,

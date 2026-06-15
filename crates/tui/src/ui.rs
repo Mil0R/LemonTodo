@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Mode, ViewMode};
 
 const SHORT_HELP: &str = "j/k select  space toggle  a add  e edit  m move  ? help  q quit";
+const READY_MESSAGE: &str = "Ready";
 
 pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
@@ -69,6 +70,8 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         ),
         Span::raw("  "),
         Span::styled(search, Style::default().add_modifier(Modifier::ITALIC)),
+        Span::raw("  |  "),
+        Span::styled(SHORT_HELP, Style::default().add_modifier(Modifier::DIM)),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(title, area);
@@ -107,7 +110,7 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let footer = match app.mode() {
         Mode::Browse => {
             let text = if app.message().is_empty() {
-                SHORT_HELP
+                READY_MESSAGE
             } else {
                 app.message()
             };
