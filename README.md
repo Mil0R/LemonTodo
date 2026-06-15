@@ -152,6 +152,7 @@ TUI controls:
 - `n`: edit selected task note
 - `d`: edit selected task due date
 - `t`: edit selected task tags
+- `m`: move selected task to a project
 - `/`: search tasks
 - `c`: clear search
 - `x`: archive selected task

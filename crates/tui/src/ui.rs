@@ -44,9 +44,9 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let help = if area.width < 100 {
-        "[] project  v view  a add e edit n note d due t tags / find x archive q quit"
+        "[] project  v view  a add e edit m move / find x archive q quit"
     } else {
-        "[] project  v view  a add  e edit  n note  d due  t tags  / search  c clear  x archive  space toggle  j/k select  q quit"
+        "[] project  v view  a add  e edit  n note  d due  t tags  m move  / search  c clear  x archive  space toggle  j/k select  q quit"
     };
 
     let search = if app.search_query().is_empty() {
@@ -114,6 +114,7 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Mode::EditNote => input_footer("Edit note", app.input()),
         Mode::EditDue => input_footer("Edit due YYYY-MM-DD, empty clears", app.input()),
         Mode::EditTags => input_footer("Edit tags", app.input()),
+        Mode::MoveProject => input_footer("Move to project", app.input()),
         Mode::Search => input_footer("Search", app.input()),
     };
     frame.render_widget(footer, area);

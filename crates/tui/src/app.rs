@@ -33,6 +33,7 @@ pub enum Mode {
     EditNote,
     EditDue,
     EditTags,
+    MoveProject,
     Search,
 }
 
@@ -244,6 +245,16 @@ impl App {
         self.message = "Edit tags separated by spaces or commas".to_owned();
     }
 
+    pub fn start_move_project(&mut self) {
+        let Some(task) = self.selected_task() else {
+            self.message = "No task selected".to_owned();
+            return;
+        };
+        self.input = self.project_name_for_task(task).to_owned();
+        self.mode = Mode::MoveProject;
+        self.message = "Move task to project".to_owned();
+    }
+
     pub fn start_search(&mut self) {
         self.input = self.search_query.clone();
         self.mode = Mode::Search;
@@ -278,6 +289,7 @@ impl App {
             Mode::EditNote => self.submit_edit_note()?,
             Mode::EditDue => self.submit_edit_due()?,
             Mode::EditTags => self.submit_edit_tags()?,
+            Mode::MoveProject => self.submit_move_project()?,
             Mode::Search => self.submit_search()?,
         }
         Ok(())
@@ -405,6 +417,41 @@ impl App {
         self.mode = Mode::Browse;
         self.refresh()?;
         self.select_task(updated.id);
+        Ok(())
+    }
+
+    fn submit_move_project(&mut self) -> Result<()> {
+        let Some(task) = self.selected_task() else {
+            self.message = "No task selected".to_owned();
+            self.input.clear();
+            self.mode = Mode::Browse;
+            return Ok(());
+        };
+        let task_id = task.id;
+        let task_title = task.title.clone();
+
+        let project_name = self.input.trim();
+        if project_name.is_empty() {
+            self.message = "Project name cannot be empty".to_owned();
+            return Ok(());
+        }
+
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.name == project_name)
+            .cloned()
+        else {
+            self.message = format!("Project not found: {project_name}");
+            return Ok(());
+        };
+
+        let moved = self.store.move_task_to_project_by_id(task_id, project.id)?;
+        self.message = format!("Moved {task_title} to {}", project.name);
+        self.input.clear();
+        self.mode = Mode::Browse;
+        self.refresh()?;
+        self.select_task(moved.id);
         Ok(())
     }
 

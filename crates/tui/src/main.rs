@@ -428,6 +428,7 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
             KeyCode::Char('n') => app.start_edit_note(),
             KeyCode::Char('d') => app.start_edit_due(),
             KeyCode::Char('t') => app.start_edit_tags(),
+            KeyCode::Char('m') => app.start_move_project(),
             KeyCode::Char('/') => app.start_search(),
             KeyCode::Char('c') => app.clear_search()?,
             KeyCode::Char('x') => app.archive_selected()?,
@@ -441,6 +442,7 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
         | Mode::EditNote
         | Mode::EditDue
         | Mode::EditTags
+        | Mode::MoveProject
         | Mode::Search => match key.code {
             KeyCode::Esc => app.cancel_input(),
             KeyCode::Enter => app.submit_input()?,
