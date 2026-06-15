@@ -25,9 +25,9 @@ The first product surface is a terminal TUI. A React Native mobile app is planne
 
 ## Current Development Slice
 
-The current `dev` branch contains the local-only CLI/TUI foundation. The binary name is `ltd`.
+The current `dev` branch contains the local CLI/TUI foundation and the first server skeleton. The CLI/TUI binary name is `ltd`; the server binary name is `ltd-server`.
 
-This is not the final interactive TUI yet. It establishes the Rust workspace, core task model, SQLite persistence, JSON snapshot import/export, and a local operation log for the future sync layer.
+This is not the final sync product yet. It establishes the Rust workspace, core task model, SQLite persistence, JSON snapshot import/export, a local operation log, sync protocol DTOs, and basic server discovery endpoints.
 
 ## Requirements
 
@@ -40,24 +40,50 @@ Build a debug binary:
 
 ```bash
 cargo build -p lemontodo-tui
+cargo build -p lemontodo-server
 ```
 
 Build a release binary:
 
 ```bash
 cargo build --release -p lemontodo-tui
+cargo build --release -p lemontodo-server
 ```
 
 The release binary is created at:
 
 ```bash
 target/release/ltd
+target/release/ltd-server
 ```
 
 Run it directly:
 
 ```bash
 ./target/release/ltd
+```
+
+Run the server skeleton:
+
+```bash
+LEMONTODO_SERVER_HOST=127.0.0.1 LEMONTODO_SERVER_PORT=8787 cargo run -p lemontodo-server
+```
+
+Available server endpoints:
+
+```text
+GET /healthz
+GET /v1/server-info
+```
+
+Server environment variables:
+
+```text
+LEMONTODO_SERVER_HOST=127.0.0.1
+LEMONTODO_SERVER_PORT=8787
+LEMONTODO_ALLOW_REGISTRATION=false
+LEMONTODO_ADMIN_EMAIL=
+LEMONTODO_ADMIN_PASSWORD=
 ```
 
 ## Install Locally
@@ -248,6 +274,6 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 ## Current Limitations
 
 - No remote sync yet.
-- No server yet.
+- Server has only `/healthz` and `/v1/server-info`; account auth and remote sync storage are not implemented yet.
 - OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log; `ltd sync ack` is a local dry-run helper, not a real server acknowledgement.

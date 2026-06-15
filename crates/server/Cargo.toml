@@ -1,0 +1,18 @@
+[package]
+name = "lemontodo-server"
+version = "0.1.0"
+edition.workspace = true
+license = "AGPL-3.0-only"
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ltd-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+lemontodo-sync = { path = "../sync" }
+serde.workspace = true
+tokio.workspace = true
