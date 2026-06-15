@@ -1,7 +1,7 @@
 mod app;
 mod ui;
 
-use std::{fs, io, path::PathBuf, time::Duration};
+use std::{collections::HashMap, fs, io, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
@@ -56,6 +56,8 @@ enum Command {
         #[arg(long, short = 'p')]
         project: Option<String>,
     },
+    /// Show task completion statistics.
+    Stats,
     /// Manage projects.
     Project {
         #[command(subcommand)]
@@ -167,6 +169,9 @@ fn main() -> Result<()> {
         }
         Some(Command::List { all, project }) => {
             print_tasks(store.list_tasks_for_project(all, project.as_deref())?)?;
+        }
+        Some(Command::Stats) => {
+            print_stats(&store)?;
         }
         Some(Command::Project { command }) => match command {
             ProjectCommand::Add { name } => {
@@ -495,6 +500,93 @@ fn print_tasks(tasks: Vec<Task>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct TaskStats {
+    open: usize,
+    done: usize,
+}
+
+impl TaskStats {
+    fn total(self) -> usize {
+        self.open + self.done
+    }
+
+    fn add_task(&mut self, task: &Task) {
+        match task.status {
+            TaskStatus::Open => self.open += 1,
+            TaskStatus::Done => self.done += 1,
+            TaskStatus::Archived => {}
+        }
+    }
+
+    fn completion_percent(self) -> usize {
+        self.done
+            .saturating_mul(100)
+            .checked_div(self.total())
+            .unwrap_or(0)
+    }
+}
+
+fn print_stats(store: &TodoStore) -> Result<()> {
+    let snapshot = store.export_snapshot()?;
+    let mut project_stats = snapshot
+        .lists
+        .iter()
+        .map(|project| (project.id, TaskStats::default()))
+        .collect::<HashMap<_, _>>();
+    let mut total = TaskStats::default();
+
+    for task in &snapshot.tasks {
+        if task.status == TaskStatus::Archived {
+            continue;
+        }
+        total.add_task(task);
+        project_stats
+            .entry(task.list_id)
+            .or_default()
+            .add_task(task);
+    }
+
+    let name_width = snapshot
+        .lists
+        .iter()
+        .map(|project| project.name.len())
+        .chain(std::iter::once("Total".len()))
+        .max()
+        .unwrap_or("Total".len());
+
+    print_stat_line("Total", total, name_width);
+    for project in snapshot.lists {
+        let stats = project_stats.remove(&project.id).unwrap_or_default();
+        print_stat_line(&project.name, stats, name_width);
+    }
+
+    Ok(())
+}
+
+fn print_stat_line(name: &str, stats: TaskStats, name_width: usize) {
+    println!(
+        "{name:<name_width$}  {} {:>3}%  {}/{} done",
+        progress_bar(stats, 24),
+        stats.completion_percent(),
+        stats.done,
+        stats.total(),
+    );
+}
+
+fn progress_bar(stats: TaskStats, width: usize) -> String {
+    let filled = stats
+        .done
+        .saturating_mul(width)
+        .checked_div(stats.total())
+        .unwrap_or(0);
+    format!(
+        "[{}{}]",
+        "#".repeat(filled),
+        "-".repeat(width.saturating_sub(filled))
+    )
 }
 
 fn default_db_path() -> PathBuf {

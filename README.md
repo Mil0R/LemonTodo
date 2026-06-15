@@ -93,6 +93,7 @@ cargo run -p lemontodo-tui -- project list
 cargo run -p lemontodo-tui -- add "Ship local MVP" --project LemonTodo --tag mvp --due 2026-06-30
 cargo run -p lemontodo-tui -- list --all
 cargo run -p lemontodo-tui -- list --project LemonTodo --all
+cargo run -p lemontodo-tui -- stats
 cargo run -p lemontodo-tui -- search "mvp"
 cargo run -p lemontodo-tui -- edit <task-id-prefix> "Ship edited MVP"
 cargo run -p lemontodo-tui -- note <task-id-prefix> "Markdown note"
@@ -123,6 +124,7 @@ ltd project list
 ltd add "Fix sync protocol notes" --project LemonTodo --tag sync --due 2026-06-30
 ltd list --all
 ltd list --project LemonTodo --all
+ltd stats
 ltd search sync
 ltd edit <task-id-prefix> "Fix encrypted sync protocol notes"
 ltd note <task-id-prefix> "Markdown note"
