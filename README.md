@@ -22,3 +22,16 @@ The first product surface is a terminal TUI. A React Native mobile app is planne
 - [Agent Guide](AGENTS.md)
 - [License Notice](LICENSE.txt)
 - [Trademark Guidelines](TRADEMARK_GUIDELINES.md)
+
+## Current Development Slice
+
+The current `dev` branch contains the first local-only CLI/TUI foundation. The installed binary name is `ltd`.
+
+```bash
+cargo run -p lemontodo-tui -- init
+cargo run -p lemontodo-tui -- add "Ship local MVP" --tag mvp --due 2026-06-30
+cargo run -p lemontodo-tui -- list --all
+cargo run -p lemontodo-tui -- done <task-id-prefix>
+```
+
+This is not the final interactive TUI yet. It establishes the Rust workspace, core task model, SQLite persistence, and command surface that the TUI will build on.
