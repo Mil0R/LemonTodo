@@ -480,7 +480,7 @@ fn main() -> Result<()> {
                 }
             }
             SyncCommand::Apply => {
-                let summary = store.apply_pending_remote_creates()?;
+                let summary = store.apply_pending_remote_operations()?;
                 println!(
                     "Applied {}, skipped {}, conflicts {}",
                     summary.applied, summary.skipped, summary.conflicts
