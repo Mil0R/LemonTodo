@@ -82,6 +82,16 @@ Servers should eventually expose `/v1/server-info` with protocol version, featur
 
 The server can store object ids, versions, sizes, timestamps, device ids, and encrypted blobs. It must not need plaintext task fields.
 
+Protocol MVP endpoints:
+
+- `GET /v1/server-info` returns protocol version, server capabilities, and batch/object limits.
+- `POST /v1/sync/push` accepts encrypted sync objects, the client device id, and the client's last known server cursor.
+- `POST /v1/sync/pull` accepts the client device id, last known server cursor, and object limit; it returns newer encrypted objects plus the next cursor.
+
+The server cursor is opaque to clients. Clients store it as `sync.last_cursor` and must not parse it.
+
+The server may reject individual pushed objects without rejecting the whole batch. Rejections must be explicit and machine-readable.
+
 Conflict handling must prefer data preservation:
 
 - merge independent object changes

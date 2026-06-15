@@ -200,6 +200,7 @@ Snapshots are plaintext local interchange files. They are not the final encrypte
 
 The current `dev` branch can initialize local encrypted vault metadata and pack pending local operations into encrypted sync objects without contacting a server.
 Tasks and projects carry a local monotonically increasing `revision`. Each pending operation records the target object revision so the future server can store opaque encrypted objects while clients reason about ordering and conflicts.
+The sync crate now defines the protocol DTOs for the future `/v1/server-info`, `/v1/sync/push`, and `/v1/sync/pull` endpoints. The CLI still only performs local dry-runs.
 
 Initialize local vault metadata:
 

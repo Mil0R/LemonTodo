@@ -5,6 +5,8 @@ use lemontodo_crypto::{CryptoEnvelope, VaultKey, decrypt, encrypt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncPack {
     pub version: u32,
@@ -14,7 +16,114 @@ pub struct SyncPack {
 }
 
 impl SyncPack {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = PROTOCOL_VERSION;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerInfo {
+    pub protocol_version: u32,
+    pub capabilities: Vec<ServerCapability>,
+    pub limits: ServerLimits,
+}
+
+impl ServerInfo {
+    pub fn minimal() -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: vec![ServerCapability::ObjectSync],
+            limits: ServerLimits::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerCapability {
+    ObjectSync,
+    CursorPull,
+    BatchPush,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerLimits {
+    pub max_push_objects: u32,
+    pub max_pull_objects: u32,
+    pub max_object_bytes: u32,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_push_objects: 500,
+            max_pull_objects: 500,
+            max_object_bytes: 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushRequest {
+    pub protocol_version: u32,
+    pub device_id: Uuid,
+    pub base_cursor: Option<String>,
+    pub objects: Vec<EncryptedSyncObject>,
+}
+
+impl PushRequest {
+    pub fn from_pack(base_cursor: Option<String>, pack: SyncPack) -> Self {
+        Self {
+            protocol_version: pack.version,
+            device_id: pack.device_id,
+            base_cursor,
+            objects: pack.objects,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushResponse {
+    pub protocol_version: u32,
+    pub accepted: Vec<AcceptedSyncObject>,
+    pub rejected: Vec<RejectedSyncObject>,
+    pub cursor: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedSyncObject {
+    pub operation_id: Uuid,
+    pub object_id: Uuid,
+    pub object_revision: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectedSyncObject {
+    pub operation_id: Uuid,
+    pub reason: RejectionReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectionReason {
+    Duplicate,
+    PayloadTooLarge,
+    InvalidEnvelope,
+    UnsupportedProtocol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub protocol_version: u32,
+    pub device_id: Uuid,
+    pub cursor: Option<String>,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullResponse {
+    pub protocol_version: u32,
+    pub cursor: String,
+    pub has_more: bool,
+    pub objects: Vec<EncryptedSyncObject>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,5 +232,59 @@ mod tests {
         let unpacked = unpack_operation(&key, &pack.objects[0]).unwrap();
         assert_eq!(unpacked.id, operation.id);
         assert_eq!(unpacked.payload, operation.payload);
+    }
+
+    #[test]
+    fn builds_push_request_from_sync_pack() {
+        let key = VaultKey::generate();
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: Uuid::new_v4(),
+            object_revision: 3,
+            object_type: ObjectType::Task,
+            operation_type: OperationType::Update,
+            payload: json!({ "title": "updated" }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        let pack =
+            pack_operations(&key, operation.device_id, std::slice::from_ref(&operation)).unwrap();
+        let request = PushRequest::from_pack(Some("cursor-1".to_owned()), pack);
+
+        assert_eq!(request.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(request.device_id, operation.device_id);
+        assert_eq!(request.base_cursor, Some("cursor-1".to_owned()));
+        assert_eq!(request.objects.len(), 1);
+        assert_eq!(request.objects[0].operation_id, operation.id);
+    }
+
+    #[test]
+    fn serializes_protocol_dtos_with_stable_names() {
+        let server_info = ServerInfo::minimal();
+        let json = serde_json::to_value(&server_info).unwrap();
+        assert_eq!(json["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(json["capabilities"][0], "object_sync");
+        assert_eq!(json["limits"]["max_push_objects"], 500);
+
+        let pull = PullRequest {
+            protocol_version: PROTOCOL_VERSION,
+            device_id: Uuid::nil(),
+            cursor: Some("cursor-2".to_owned()),
+            limit: 100,
+        };
+        let json = serde_json::to_value(&pull).unwrap();
+        assert_eq!(json["protocol_version"], PROTOCOL_VERSION);
+        assert_eq!(json["device_id"], Uuid::nil().to_string());
+        assert_eq!(json["cursor"], "cursor-2");
+        assert_eq!(json["limit"], 100);
+
+        let rejection = RejectedSyncObject {
+            operation_id: Uuid::nil(),
+            reason: RejectionReason::Duplicate,
+        };
+        let json = serde_json::to_value(&rejection).unwrap();
+        assert_eq!(json["reason"], "duplicate");
     }
 }
