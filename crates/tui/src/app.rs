@@ -14,6 +14,7 @@ pub struct App {
     selected: usize,
     input: String,
     mode: Mode,
+    view_mode: ViewMode,
     message: String,
     search_query: String,
 }
@@ -35,6 +36,12 @@ pub enum Mode {
     Search,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Compact,
+    Detail,
+}
+
 impl App {
     pub fn new(store: TodoStore) -> Result<Self> {
         let mut app = Self {
@@ -46,6 +53,7 @@ impl App {
             selected: 0,
             input: String::new(),
             mode: Mode::Browse,
+            view_mode: ViewMode::Compact,
             message: String::new(),
             search_query: String::new(),
         };
@@ -85,6 +93,17 @@ impl App {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn view_mode(&self) -> ViewMode {
+        self.view_mode
+    }
+
+    pub fn view_mode_name(&self) -> &str {
+        match self.view_mode {
+            ViewMode::Compact => "compact",
+            ViewMode::Detail => "detail",
+        }
     }
 
     pub fn message(&self) -> &str {
@@ -166,6 +185,14 @@ impl App {
         };
         self.message = format!("Project: {}", self.current_project_name());
         self.refresh()
+    }
+
+    pub fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Compact => ViewMode::Detail,
+            ViewMode::Detail => ViewMode::Compact,
+        };
+        self.message = format!("View: {}", self.view_mode_name());
     }
 
     pub fn start_add(&mut self) {

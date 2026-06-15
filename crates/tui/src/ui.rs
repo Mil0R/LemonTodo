@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use lemontodo_core::{Task, TaskStatus};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -7,7 +8,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, ViewMode};
 
 pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
@@ -43,9 +44,9 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let help = if area.width < 100 {
-        "[] project  a add e edit n note d due t tags / find x archive q quit"
+        "[] project  v view  a add e edit n note d due t tags / find x archive q quit"
     } else {
-        "[] project  a add  e edit  n note  d due  t tags  / search  c clear  x archive  space toggle  j/k move  q quit"
+        "[] project  v view  a add  e edit  n note  d due  t tags  / search  c clear  x archive  space toggle  j/k select  q quit"
     };
 
     let search = if app.search_query().is_empty() {
@@ -59,6 +60,11 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Span::raw("  "),
         Span::styled(
             format!("project: {}", app.current_project_name()),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("view: {}", app.view_mode_name()),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
@@ -78,7 +84,7 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     } else {
         app.tasks()
             .iter()
-            .map(|task| task_item(task, app.project_name_for_task(task)))
+            .map(|task| task_item(task, app.project_name_for_task(task), app.view_mode()))
             .collect()
     };
 
@@ -117,7 +123,7 @@ fn input_footer<'a>(title: &'a str, input: &'a str) -> Paragraph<'a> {
     Paragraph::new(input).block(Block::default().title(title).borders(Borders::ALL))
 }
 
-fn task_item<'a>(task: &'a Task, project_name: &'a str) -> ListItem<'a> {
+fn task_item<'a>(task: &'a Task, project_name: &'a str, view_mode: ViewMode) -> ListItem<'a> {
     let marker = match task.status {
         TaskStatus::Open => "[ ]",
         TaskStatus::Done => "[x]",
@@ -146,16 +152,61 @@ fn task_item<'a>(task: &'a Task, project_name: &'a str) -> ListItem<'a> {
     };
     let meta_style = Style::default().add_modifier(Modifier::DIM);
 
-    ListItem::new(Line::from(vec![
+    let title = Line::from(vec![
         Span::styled(marker, task_style),
-        Span::raw(" "),
-        Span::styled(short_id(&task.id.to_string()).to_owned(), meta_style),
         Span::raw(" "),
         Span::styled(task.title.clone(), task_style),
         Span::styled(format!(" [{}]", project_name), meta_style),
         Span::styled(due, meta_style),
         Span::styled(tags, meta_style),
-    ]))
+    ]);
+
+    match view_mode {
+        ViewMode::Compact => ListItem::new(title),
+        ViewMode::Detail => ListItem::new(vec![
+            title,
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(format!("id: {}", task.id), meta_style),
+                Span::raw("  "),
+                Span::styled(format!("project: {project_name}"), meta_style),
+                Span::raw("  "),
+                Span::styled(
+                    format!("created: {}", format_time(task.created_at)),
+                    meta_style,
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("updated: {}", format_time(task.updated_at)),
+                    meta_style,
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!(
+                        "due: {}",
+                        task.due_date
+                            .map(|date| date.to_string())
+                            .unwrap_or_else(|| "-".to_owned())
+                    ),
+                    meta_style,
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!(
+                        "tags: {}",
+                        if task.tags.is_empty() {
+                            "-".to_owned()
+                        } else {
+                            task.tags.join(",")
+                        }
+                    ),
+                    meta_style,
+                ),
+            ]),
+        ]),
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -178,6 +229,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
+fn format_time(value: DateTime<Utc>) -> String {
+    value.format("%Y-%m-%d %H:%MZ").to_string()
 }

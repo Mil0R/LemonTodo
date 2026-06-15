@@ -142,9 +142,10 @@ ltd move <task-id-prefix> LemonTodo
 
 TUI controls:
 
-- `j` / `Down`: move down
-- `k` / `Up`: move up
+- `j` / `Down`: select next task
+- `k` / `Up`: select previous task
 - `[` / `]`: switch project filter
+- `v`: switch compact/detail view
 - `space`: toggle selected task done/open
 - `a`: add a task
 - `e`: edit selected task title

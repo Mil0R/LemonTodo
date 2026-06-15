@@ -421,6 +421,7 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
             KeyCode::Char('k') | KeyCode::Up => app.move_up(),
             KeyCode::Char('[') => app.previous_project()?,
             KeyCode::Char(']') => app.next_project()?,
+            KeyCode::Char('v') => app.toggle_view_mode(),
             KeyCode::Char(' ') => app.toggle_selected()?,
             KeyCode::Char('a') => app.start_add(),
             KeyCode::Char('e') => app.start_edit_title(),
