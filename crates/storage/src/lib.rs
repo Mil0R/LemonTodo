@@ -5,6 +5,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use lemontodo_core::{
     List, NewTask, ObjectType, Operation, OperationType, Task, TaskStatus, TodoSnapshot,
 };
+use lemontodo_crypto::EncryptedVaultKey;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 use uuid::Uuid;
@@ -235,6 +236,21 @@ impl TodoStore {
         let rows = stmt.query_map([], row_to_operation)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list pending operations")
+    }
+
+    pub fn save_encrypted_vault_key(&self, encrypted_vault_key: &EncryptedVaultKey) -> Result<()> {
+        self.set_sync_state(
+            "encrypted_vault_key",
+            &serde_json::to_string(encrypted_vault_key)?,
+        )
+    }
+
+    pub fn encrypted_vault_key(&self) -> Result<Option<EncryptedVaultKey>> {
+        self.get_sync_state("encrypted_vault_key")?
+            .map(|value| {
+                serde_json::from_str(&value).context("failed to parse encrypted vault key")
+            })
+            .transpose()
     }
 
     pub fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
@@ -568,6 +584,29 @@ impl TodoStore {
         )?;
 
         Ok(operation)
+    }
+
+    fn set_sync_state(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sync_state (key, value, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at",
+            params![key, value, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    fn get_sync_state(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM sync_state WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to get sync state")
     }
 
     fn migrate(&self) -> Result<()> {

@@ -12,7 +12,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use lemontodo_core::{NewTask, Task, TaskStatus};
-use lemontodo_crypto::VaultKey;
+use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::TodoStore;
 use lemontodo_sync::pack_operations;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -96,6 +96,11 @@ enum Command {
         #[command(subcommand)]
         command: SyncCommand,
     },
+    /// Manage the local encrypted vault metadata.
+    Vault {
+        #[command(subcommand)]
+        command: VaultCommand,
+    },
     /// Archive a task by id prefix.
     Archive { id: String },
 }
@@ -115,10 +120,23 @@ enum SyncCommand {
     /// Pack pending operations into encrypted sync objects.
     Pack {
         #[arg(long)]
-        key: String,
+        key: Option<String>,
+        #[arg(long)]
+        master_password: Option<String>,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum VaultCommand {
+    /// Initialize local vault metadata with a master password.
+    Init {
+        #[arg(long)]
+        master_password: String,
+    },
+    /// Show whether local vault metadata exists.
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -259,8 +277,12 @@ fn main() -> Result<()> {
             SyncCommand::Keygen => {
                 println!("{}", VaultKey::generate().to_hex());
             }
-            SyncCommand::Pack { key, out } => {
-                let vault_key = VaultKey::from_hex(&key)?;
+            SyncCommand::Pack {
+                key,
+                master_password,
+                out,
+            } => {
+                let vault_key = load_vault_key(&store, key.as_deref(), master_password.as_deref())?;
                 let operations = store.pending_operations()?;
                 let pack = pack_operations(&vault_key, &operations)?;
                 let json = serde_json::to_string_pretty(&pack)?;
@@ -277,6 +299,28 @@ fn main() -> Result<()> {
                 }
             }
         },
+        Some(Command::Vault { command }) => match command {
+            VaultCommand::Init { master_password } => {
+                if store.encrypted_vault_key()?.is_some() {
+                    anyhow::bail!("local vault metadata already exists");
+                }
+                let vault_key = VaultKey::generate();
+                let encrypted_vault_key = wrap_vault_key(
+                    &vault_key,
+                    &master_password,
+                    KdfParams::generate_interactive(),
+                )?;
+                store.save_encrypted_vault_key(&encrypted_vault_key)?;
+                println!("Initialized local encrypted vault metadata");
+            }
+            VaultCommand::Status => {
+                if store.encrypted_vault_key()?.is_some() {
+                    println!("Local encrypted vault metadata exists");
+                } else {
+                    println!("Local encrypted vault metadata is not initialized");
+                }
+            }
+        },
         Some(Command::Archive { id }) => {
             let task = store.archive_task(&id)?;
             println!("Archived {} {}", short_id(&task.id.to_string()), task.title);
@@ -285,6 +329,28 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_vault_key(
+    store: &TodoStore,
+    key: Option<&str>,
+    master_password: Option<&str>,
+) -> Result<VaultKey> {
+    match (key, master_password) {
+        (Some(key), None) => VaultKey::from_hex(key),
+        (None, Some(master_password)) => {
+            let encrypted = store
+                .encrypted_vault_key()?
+                .context("local vault metadata is not initialized; run ltd vault init first")?;
+            unwrap_vault_key(&encrypted, master_password)
+        }
+        (Some(_), Some(_)) => {
+            anyhow::bail!("use either --key or --master-password, not both")
+        }
+        (None, None) => {
+            anyhow::bail!("sync pack requires --master-password or --key")
+        }
+    }
 }
 
 fn run_tui(store: TodoStore) -> Result<()> {

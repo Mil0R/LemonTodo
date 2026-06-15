@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub const VAULT_KEY_LEN: usize = 32;
 pub const XCHACHA20_NONCE_LEN: usize = 24;
+pub const KDF_SALT_LEN: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultKey([u8; VAULT_KEY_LEN]);
@@ -22,21 +24,29 @@ impl VaultKey {
 
     pub fn from_hex(value: &str) -> Result<Self> {
         let bytes = hex::decode(value.trim()).context("failed to decode vault key hex")?;
-        if bytes.len() != VAULT_KEY_LEN {
+        Self::from_bytes(&bytes)
+    }
+
+    pub fn from_bytes(value: &[u8]) -> Result<Self> {
+        if value.len() != VAULT_KEY_LEN {
             bail!(
                 "vault key must be {} bytes, got {} bytes",
                 VAULT_KEY_LEN,
-                bytes.len()
+                value.len()
             );
         }
 
         let mut key = [0_u8; VAULT_KEY_LEN];
-        key.copy_from_slice(&bytes);
+        key.copy_from_slice(value);
         Ok(Self(key))
     }
 
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; VAULT_KEY_LEN] {
+        &self.0
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
@@ -55,6 +65,37 @@ pub struct CryptoEnvelope {
 impl CryptoEnvelope {
     pub const VERSION: u32 = 1;
     pub const CIPHER: &'static str = "xchacha20poly1305";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KdfParams {
+    pub algorithm: String,
+    pub version: u32,
+    pub memory_cost_kib: u32,
+    pub time_cost: u32,
+    pub parallelism: u32,
+    pub salt: String,
+}
+
+impl KdfParams {
+    pub fn generate_interactive() -> Self {
+        let mut salt = [0_u8; KDF_SALT_LEN];
+        OsRng.fill_bytes(&mut salt);
+        Self {
+            algorithm: "argon2id".to_owned(),
+            version: 19,
+            memory_cost_kib: 64 * 1024,
+            time_cost: 3,
+            parallelism: 1,
+            salt: STANDARD.encode(salt),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncryptedVaultKey {
+    pub kdf: KdfParams,
+    pub envelope: CryptoEnvelope,
 }
 
 pub fn encrypt(vault_key: &VaultKey, plaintext: &[u8], aad: &[u8]) -> Result<CryptoEnvelope> {
@@ -114,6 +155,56 @@ pub fn decrypt(vault_key: &VaultKey, envelope: &CryptoEnvelope, aad: &[u8]) -> R
         .map_err(|error| anyhow::anyhow!("failed to decrypt envelope: {error}"))
 }
 
+pub fn wrap_vault_key(
+    vault_key: &VaultKey,
+    master_password: &str,
+    kdf: KdfParams,
+) -> Result<EncryptedVaultKey> {
+    let wrapping_key = derive_wrapping_key(master_password, &kdf)?;
+    let envelope = encrypt(
+        &wrapping_key,
+        vault_key.as_bytes(),
+        b"lemontodo:vault-key:v1",
+    )?;
+    Ok(EncryptedVaultKey { kdf, envelope })
+}
+
+pub fn unwrap_vault_key(encrypted: &EncryptedVaultKey, master_password: &str) -> Result<VaultKey> {
+    let wrapping_key = derive_wrapping_key(master_password, &encrypted.kdf)?;
+    let plaintext = decrypt(
+        &wrapping_key,
+        &encrypted.envelope,
+        b"lemontodo:vault-key:v1",
+    )?;
+    VaultKey::from_bytes(&plaintext)
+}
+
+fn derive_wrapping_key(master_password: &str, kdf: &KdfParams) -> Result<VaultKey> {
+    if kdf.algorithm != "argon2id" {
+        bail!("unsupported kdf algorithm {}", kdf.algorithm);
+    }
+    if kdf.version != 19 {
+        bail!("unsupported argon2 version {}", kdf.version);
+    }
+
+    let salt = STANDARD
+        .decode(&kdf.salt)
+        .context("failed to decode kdf salt")?;
+    let params = Params::new(
+        kdf.memory_cost_kib,
+        kdf.time_cost,
+        kdf.parallelism,
+        Some(VAULT_KEY_LEN),
+    )
+    .map_err(|error| anyhow::anyhow!("invalid argon2 params: {error}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut output = [0_u8; VAULT_KEY_LEN];
+    argon2
+        .hash_password_into(master_password.as_bytes(), &salt, &mut output)
+        .map_err(|error| anyhow::anyhow!("failed to derive wrapping key: {error}"))?;
+    Ok(VaultKey(output))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +223,20 @@ mod tests {
         let key = VaultKey::generate();
         let envelope = encrypt(&key, b"hello", b"aad-1").unwrap();
         assert!(decrypt(&key, &envelope, b"aad-2").is_err());
+    }
+
+    #[test]
+    fn wraps_and_unwraps_vault_key() {
+        let vault_key = VaultKey::generate();
+        let encrypted = wrap_vault_key(
+            &vault_key,
+            "correct horse battery staple",
+            KdfParams::generate_interactive(),
+        )
+        .unwrap();
+
+        let unwrapped = unwrap_vault_key(&encrypted, "correct horse battery staple").unwrap();
+        assert_eq!(unwrapped, vault_key);
+        assert!(unwrap_vault_key(&encrypted, "wrong password").is_err());
     }
 }

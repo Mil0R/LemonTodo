@@ -134,8 +134,9 @@ ltd archive <task-id-prefix>
 ltd export ./lemontodo.snapshot.json
 ltd import ./lemontodo.snapshot.json
 ltd ops
-ltd sync keygen
-ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
+ltd vault init --master-password "dev-password"
+ltd vault status
+ltd sync pack --master-password "dev-password" --out ./sync-pack.json
 ltd move <task-id-prefix> LemonTodo
 ```
 
@@ -191,25 +192,34 @@ Snapshots are plaintext local interchange files. They are not the final encrypte
 
 ## Local Sync Dry Run
 
-The current `dev` branch can pack pending local operations into encrypted sync objects without contacting a server.
+The current `dev` branch can initialize local encrypted vault metadata and pack pending local operations into encrypted sync objects without contacting a server.
 
-Generate a development vault key:
+Initialize local vault metadata:
+
+```bash
+ltd vault init --master-password "dev-password"
+```
+
+Create an encrypted sync pack:
+
+```bash
+ltd sync pack --master-password "dev-password" --out ./sync-pack.json
+```
+
+This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
+
+For low-level development, a raw vault key can still be generated and used directly:
 
 ```bash
 ltd sync keygen
-```
-
-Use that key to create an encrypted sync pack:
-
-```bash
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is a local E2EE dry-run for the future sync protocol. It does not implement account login, master-password key derivation, upload, pull, or conflict resolution yet.
+This is a local E2EE dry-run for the future sync protocol. It does not implement account login, upload, pull, or conflict resolution yet.
 
 ## Current Limitations
 
 - No remote sync yet.
-- No master-password key derivation yet.
 - No server yet.
+- Master password is passed through CLI flags for now; this should move to hidden interactive input and OS keyring support later.
 - `ltd ops` only inspects the local pending operation log for future sync work.
