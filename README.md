@@ -77,6 +77,8 @@ GET /v1/server-info
 POST /v1/account/register
 POST /v1/account/login
 POST /v1/account/logout
+GET /v1/account/vault-key
+PUT /v1/account/vault-key
 POST /v1/sync/push
 POST /v1/sync/pull
 ```
@@ -139,6 +141,8 @@ cargo run -p lemontodo-tui -- sync configure --server-url http://127.0.0.1:8787 
 cargo run -p lemontodo-tui -- sync register --email you@example.com
 cargo run -p lemontodo-tui -- sync login --email you@example.com
 cargo run -p lemontodo-tui -- sync logout
+cargo run -p lemontodo-tui -- sync vault push
+cargo run -p lemontodo-tui -- sync vault pull
 cargo run -p lemontodo-tui -- move <task-id-prefix> LemonTodo
 cargo run -p lemontodo-tui -- done <task-id-prefix>
 cargo run -p lemontodo-tui -- archive <task-id-prefix>
@@ -180,6 +184,8 @@ ltd sync register --email you@example.com
 ltd sync login --email you@example.com
 ltd sync status
 ltd sync logout
+ltd sync vault push
+ltd sync vault pull
 ltd move <task-id-prefix> LemonTodo
 ```
 
@@ -267,6 +273,7 @@ Configure a sync server and push pending encrypted operations:
 ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
 ltd sync register --email you@example.com
 ltd sync login --email you@example.com
+ltd sync vault push
 ltd sync push
 ```
 
@@ -288,6 +295,7 @@ ltd sync pull --json
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
 `ltd sync status` shows the configured server account email and whether an access token is stored locally.
 `ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first.
+`ltd sync vault push` uploads the local `EncryptedVaultKey` to the current server account. `ltd sync vault pull` downloads it for a new device and refuses to overwrite local metadata unless `--force` is passed.
 These commands prompt for the master password without echoing it to the terminal. Registration and login also prompt for the account password without echoing it. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:
@@ -304,7 +312,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, revoke the current session, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement session expiry management, encrypted vault metadata sync, or full conflict resolution yet.
+This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, revoke the current session, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement session expiry management or full conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 
@@ -316,6 +324,6 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 ## Current Limitations
 
 - Remote push exists; remote pull stores pending remote operations, and apply handles safe remote creates plus safe task updates/archives.
-- Server has `/healthz`, `/v1/server-info`, `/v1/account/register`, `/v1/account/login`, `/v1/account/logout`, and token-authenticated `/v1/sync/push` and `/v1/sync/pull`; encrypted vault metadata and richer device/session management are not implemented yet.
+- Server has `/healthz`, `/v1/server-info`, `/v1/account/register`, `/v1/account/login`, `/v1/account/logout`, `/v1/account/vault-key`, and token-authenticated `/v1/sync/push` and `/v1/sync/pull`; richer device/session management is not implemented yet.
 - OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log; `ltd sync ack` remains useful for manual dry-runs, while `ltd sync push` acknowledges accepted server uploads automatically.

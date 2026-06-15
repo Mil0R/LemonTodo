@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use lemontodo_core::Operation;
-use lemontodo_crypto::{CryptoEnvelope, VaultKey, decrypt, encrypt};
+use lemontodo_crypto::{CryptoEnvelope, EncryptedVaultKey, VaultKey, decrypt, encrypt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -181,6 +181,18 @@ pub struct LogoutRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogoutResponse {
     pub revoked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutVaultMetadataRequest {
+    pub access_token: String,
+    pub encrypted_vault_key: EncryptedVaultKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultMetadataResponse {
+    pub has_vault_key: bool,
+    pub encrypted_vault_key: Option<EncryptedVaultKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

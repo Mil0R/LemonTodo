@@ -15,8 +15,8 @@ use chrono::{DateTime, Utc};
 use lemontodo_sync::{
     AcceptedSyncObject, EncryptedSyncObject, LoginRequest, LoginResponse, LogoutRequest,
     LogoutResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse,
-    RegisterRequest, RegisterResponse, RejectedSyncObject, RejectionReason, ServerAuthInfo,
-    ServerCapability, ServerInfo,
+    PutVaultMetadataRequest, RegisterRequest, RegisterResponse, RejectedSyncObject,
+    RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo, VaultMetadataResponse,
 };
 use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -110,6 +110,7 @@ pub struct UserAccount {
     pub email: String,
     pub password_hash: String,
     pub is_admin: bool,
+    pub encrypted_vault_key_json: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -177,16 +178,18 @@ impl ServerStore {
             email,
             password_hash: hash_password(password)?,
             is_admin,
+            encrypted_vault_key_json: None,
             created_at: Utc::now(),
         };
         self.conn.execute(
-            "INSERT INTO users (id, email, password_hash, is_admin, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO users (id, email, password_hash, is_admin, encrypted_vault_key_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 user.id.to_string(),
                 user.email,
                 user.password_hash,
                 user.is_admin,
+                user.encrypted_vault_key_json,
                 user.created_at.to_rfc3339(),
             ],
         )?;
@@ -231,6 +234,20 @@ impl ServerStore {
             .execute("DELETE FROM user_sessions WHERE token = ?1", params![token])
             .context("failed to revoke session")?;
         Ok(deleted > 0)
+    }
+
+    pub fn set_encrypted_vault_key(
+        &mut self,
+        user_id: Uuid,
+        encrypted_vault_key_json: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE users SET encrypted_vault_key_json = ?1 WHERE id = ?2",
+                params![encrypted_vault_key_json, user_id.to_string()],
+            )
+            .context("failed to store encrypted vault key")?;
+        Ok(())
     }
 
     pub fn push(&mut self, user_id: Uuid, request: PushRequest) -> Result<PushResponse> {
@@ -362,6 +379,7 @@ impl ServerStore {
                 email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                encrypted_vault_key_json TEXT,
                 created_at TEXT NOT NULL
             );
 
@@ -405,13 +423,15 @@ impl ServerStore {
             "user_id",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        add_column_if_missing(&self.conn, "users", "encrypted_vault_key_json", "TEXT")?;
         Ok(())
     }
 
     fn find_user_by_id(&self, id: Uuid) -> Result<Option<UserAccount>> {
         self.conn
             .query_row(
-                "SELECT id, email, password_hash, is_admin, created_at FROM users WHERE id = ?1",
+                "SELECT id, email, password_hash, is_admin, encrypted_vault_key_json, created_at
+                 FROM users WHERE id = ?1",
                 params![id.to_string()],
                 row_to_user_account,
             )
@@ -423,7 +443,8 @@ impl ServerStore {
         let email = normalize_email(email)?;
         self.conn
             .query_row(
-                "SELECT id, email, password_hash, is_admin, created_at FROM users WHERE email = ?1",
+                "SELECT id, email, password_hash, is_admin, encrypted_vault_key_json, created_at
+                 FROM users WHERE email = ?1",
                 params![email],
                 row_to_user_account,
             )
@@ -462,6 +483,11 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/account/login", axum::routing::post(account_login))
         .route("/v1/account/logout", axum::routing::post(account_logout))
+        .route("/v1/account/vault-key", get(account_get_vault_key))
+        .route(
+            "/v1/account/vault-key",
+            axum::routing::put(account_put_vault_key),
+        )
         .route("/v1/sync/push", axum::routing::post(sync_push))
         .route("/v1/sync/pull", axum::routing::post(sync_pull))
         .with_state(state)
@@ -570,6 +596,68 @@ async fn account_logout(
         .revoke_session(&request.access_token)
         .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
     Ok(Json(LogoutResponse { revoked }))
+}
+
+async fn account_get_vault_key(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<VaultMetadataResponse>, (StatusCode, String)> {
+    let access_token = query
+        .get("access_token")
+        .map(String::as_str)
+        .ok_or((StatusCode::BAD_REQUEST, "missing access_token".to_owned()))?;
+    let store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    let user = store
+        .authenticate(access_token)
+        .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
+    let encrypted_vault_key = user
+        .encrypted_vault_key_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to parse stored vault metadata: {error}"),
+            )
+        })?;
+    Ok(Json(VaultMetadataResponse {
+        has_vault_key: encrypted_vault_key.is_some(),
+        encrypted_vault_key,
+    }))
+}
+
+async fn account_put_vault_key(
+    State(state): State<AppState>,
+    Json(request): Json<PutVaultMetadataRequest>,
+) -> Result<Json<VaultMetadataResponse>, (StatusCode, String)> {
+    let mut store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    let user = store
+        .authenticate(&request.access_token)
+        .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
+    let json = serde_json::to_string(&request.encrypted_vault_key).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize vault metadata: {error}"),
+        )
+    })?;
+    store
+        .set_encrypted_vault_key(user.id, &json)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(VaultMetadataResponse {
+        has_vault_key: true,
+        encrypted_vault_key: Some(request.encrypted_vault_key),
+    }))
 }
 
 async fn sync_push(
@@ -765,7 +853,8 @@ fn row_to_user_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserAccount>
         email: row.get(1)?,
         password_hash: row.get(2)?,
         is_admin: row.get(3)?,
-        created_at: parse_datetime(row.get::<_, String>(4)?)?,
+        encrypted_vault_key_json: row.get(4)?,
+        created_at: parse_datetime(row.get::<_, String>(5)?)?,
     })
 }
 
@@ -782,9 +871,10 @@ fn row_to_user_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserSession>
 mod tests {
     use std::collections::HashMap;
 
-    use lemontodo_crypto::CryptoEnvelope;
+    use lemontodo_crypto::{CryptoEnvelope, KdfParams, VaultKey, wrap_vault_key};
     use lemontodo_sync::{
-        LoginRequest, LogoutRequest, PROTOCOL_VERSION, RegisterRequest, ServerCapability,
+        LoginRequest, LogoutRequest, PROTOCOL_VERSION, PutVaultMetadataRequest, RegisterRequest,
+        ServerCapability,
     };
 
     use super::*;
@@ -999,6 +1089,57 @@ mod tests {
         assert!(response.revoked);
         let store = state.store.lock().unwrap();
         assert!(store.authenticate(&login.access_token).is_err());
+    }
+
+    #[tokio::test]
+    async fn vault_metadata_round_trip_is_user_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(login) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let encrypted_vault_key = wrap_vault_key(
+            &VaultKey::generate(),
+            "master-password",
+            KdfParams::generate_interactive(),
+        )
+        .unwrap();
+
+        let Json(uploaded) = account_put_vault_key(
+            State(state.clone()),
+            Json(PutVaultMetadataRequest {
+                access_token: login.access_token.clone(),
+                encrypted_vault_key: encrypted_vault_key.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(uploaded.has_vault_key);
+
+        let mut query = std::collections::HashMap::new();
+        query.insert("access_token".to_owned(), login.access_token.clone());
+        let Json(downloaded) = account_get_vault_key(State(state), axum::extract::Query(query))
+            .await
+            .unwrap();
+        assert!(downloaded.has_vault_key);
+        assert_eq!(downloaded.encrypted_vault_key, Some(encrypted_vault_key));
     }
 
     #[test]

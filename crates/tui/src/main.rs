@@ -16,8 +16,8 @@ use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
     LoginRequest, LoginResponse, LogoutRequest, LogoutResponse, PROTOCOL_VERSION, PullRequest,
-    PullResponse, PushRequest, PushResponse, RegisterRequest, RegisterResponse, pack_operations,
-    unpack_operation,
+    PullResponse, PushRequest, PushResponse, PutVaultMetadataRequest, RegisterRequest,
+    RegisterResponse, VaultMetadataResponse, pack_operations, unpack_operation,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -203,6 +203,13 @@ enum SyncCommand {
         /// Do not save pulled operations to the local pending-apply inbox.
         #[arg(long)]
         no_save: bool,
+    },
+    /// Upload local encrypted vault metadata to the server account.
+    VaultPush,
+    /// Download encrypted vault metadata from the server account.
+    VaultPull {
+        #[arg(long)]
+        force: bool,
     },
     /// Inspect decrypted remote operations waiting for apply.
     Inbox {
@@ -564,6 +571,18 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            SyncCommand::VaultPush => {
+                push_vault_metadata(&store)?;
+                println!("Uploaded encrypted vault metadata");
+            }
+            SyncCommand::VaultPull { force } => {
+                let downloaded = pull_vault_metadata(&store, force)?;
+                if downloaded {
+                    println!("Downloaded encrypted vault metadata");
+                } else {
+                    println!("Server account has no encrypted vault metadata");
+                }
+            }
             SyncCommand::Inbox { json } => {
                 let pending = store.pending_remote_operations()?;
                 if json {
@@ -765,6 +784,36 @@ fn pull_remote_operations(
     })
 }
 
+fn push_vault_metadata(store: &TodoStore) -> Result<()> {
+    let server_url = configured_server_url(store, None)?;
+    let access_token = configured_access_token(store)?;
+    let encrypted_vault_key = store
+        .encrypted_vault_key()?
+        .context("local vault metadata is not initialized; run ltd vault init first")?;
+    put_vault_metadata_request(
+        &server_url,
+        &PutVaultMetadataRequest {
+            access_token,
+            encrypted_vault_key,
+        },
+    )?;
+    Ok(())
+}
+
+fn pull_vault_metadata(store: &TodoStore, force: bool) -> Result<bool> {
+    if store.encrypted_vault_key()?.is_some() && !force {
+        anyhow::bail!("local vault metadata already exists; use --force to overwrite");
+    }
+    let server_url = configured_server_url(store, None)?;
+    let access_token = configured_access_token(store)?;
+    let response = get_vault_metadata_request(&server_url, &access_token)?;
+    let Some(encrypted_vault_key) = response.encrypted_vault_key else {
+        return Ok(false);
+    };
+    store.save_encrypted_vault_key(&encrypted_vault_key)?;
+    Ok(true)
+}
+
 fn register_account(
     store: &TodoStore,
     server_url: Option<&str>,
@@ -863,6 +912,33 @@ fn post_logout_request(server_url: &str, request: &LogoutRequest) -> Result<Logo
         .body_mut()
         .read_json::<LogoutResponse>()
         .context("failed to parse logout response")
+}
+
+fn put_vault_metadata_request(
+    server_url: &str,
+    request: &PutVaultMetadataRequest,
+) -> Result<VaultMetadataResponse> {
+    let endpoint = format!("{server_url}/v1/account/vault-key");
+    ureq::put(&endpoint)
+        .send_json(request)
+        .with_context(|| format!("failed to PUT {endpoint}"))?
+        .body_mut()
+        .read_json::<VaultMetadataResponse>()
+        .context("failed to parse vault metadata response")
+}
+
+fn get_vault_metadata_request(
+    server_url: &str,
+    access_token: &str,
+) -> Result<VaultMetadataResponse> {
+    let endpoint = format!("{server_url}/v1/account/vault-key");
+    ureq::get(&endpoint)
+        .query("access_token", access_token)
+        .call()
+        .with_context(|| format!("failed to GET {endpoint}"))?
+        .body_mut()
+        .read_json::<VaultMetadataResponse>()
+        .context("failed to parse vault metadata response")
 }
 
 fn configured_server_url(store: &TodoStore, override_url: Option<&str>) -> Result<String> {

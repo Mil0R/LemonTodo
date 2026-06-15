@@ -93,6 +93,8 @@ The current MVP server also exposes:
 POST /v1/account/register
 POST /v1/account/login
 POST /v1/account/logout
+GET /v1/account/vault-key
+PUT /v1/account/vault-key
 POST /v1/sync/push
 POST /v1/sync/pull
 ```
