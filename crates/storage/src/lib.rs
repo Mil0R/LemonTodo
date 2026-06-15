@@ -13,6 +13,7 @@ use uuid::Uuid;
 const TUI_CURRENT_PROJECT_KEY: &str = "tui.current_project";
 const DEVICE_ID_KEY: &str = "sync.device_id";
 const LAST_SYNC_CURSOR_KEY: &str = "sync.last_cursor";
+const SYNC_SERVER_URL_KEY: &str = "sync.server_url";
 
 pub struct TodoStore {
     conn: Connection,
@@ -307,6 +308,14 @@ impl TodoStore {
 
     pub fn last_sync_cursor(&self) -> Result<Option<String>> {
         self.get_sync_state(LAST_SYNC_CURSOR_KEY)
+    }
+
+    pub fn save_sync_server_url(&self, server_url: &str) -> Result<()> {
+        self.set_sync_state(SYNC_SERVER_URL_KEY, normalize_server_url(server_url)?)
+    }
+
+    pub fn sync_server_url(&self) -> Result<Option<String>> {
+        self.get_sync_state(SYNC_SERVER_URL_KEY)
     }
 
     pub fn save_encrypted_vault_key(&self, encrypted_vault_key: &EncryptedVaultKey) -> Result<()> {
@@ -1052,6 +1061,17 @@ fn normalize_project_name(name: &str) -> Result<String> {
     Ok(name.to_owned())
 }
 
+fn normalize_server_url(url: &str) -> Result<&str> {
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        bail!("sync server URL cannot be empty");
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        bail!("sync server URL must start with http:// or https://");
+    }
+    Ok(url)
+}
+
 fn parse_uuid(value: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&value).map_err(to_sql_error)
 }
@@ -1277,6 +1297,28 @@ mod tests {
         assert_eq!(
             reopened.last_sync_cursor().unwrap(),
             Some("server-cursor-2".to_owned())
+        );
+    }
+
+    #[test]
+    fn persists_sync_server_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lemontodo.db");
+        let store = TodoStore::open(&db_path).unwrap();
+
+        assert_eq!(store.sync_server_url().unwrap(), None);
+        store
+            .save_sync_server_url("http://localhost:8787/")
+            .unwrap();
+        assert_eq!(
+            store.sync_server_url().unwrap(),
+            Some("http://localhost:8787".to_owned())
+        );
+
+        let reopened = TodoStore::open(db_path).unwrap();
+        assert_eq!(
+            reopened.sync_server_url().unwrap(),
+            Some("http://localhost:8787".to_owned())
         );
     }
 }

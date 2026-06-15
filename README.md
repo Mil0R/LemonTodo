@@ -227,9 +227,9 @@ Snapshots are plaintext local interchange files. They are not the final encrypte
 
 ## Local Sync Dry Run
 
-The current `dev` branch can initialize local encrypted vault metadata and pack pending local operations into encrypted sync objects without contacting a server.
+The current `dev` branch can initialize local encrypted vault metadata, pack pending local operations into encrypted sync objects, and push those objects to a configured LemonTodo server.
 Tasks and projects carry a local monotonically increasing `revision`. Each pending operation records the target object revision so the future server can store opaque encrypted objects while clients reason about ordering and conflicts.
-The sync crate now defines the protocol DTOs for the future `/v1/server-info`, `/v1/sync/push`, and `/v1/sync/pull` endpoints. The CLI still only performs local dry-runs.
+The sync crate defines the protocol DTOs for `/v1/server-info`, `/v1/sync/push`, and `/v1/sync/pull`.
 
 Initialize local vault metadata:
 
@@ -249,6 +249,13 @@ Inspect local sync state:
 ltd sync status
 ```
 
+Configure a sync server and push pending encrypted operations:
+
+```bash
+ltd sync configure --server-url http://127.0.0.1:8787
+ltd sync push
+```
+
 These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:
@@ -265,7 +272,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is a local E2EE dry-run for the future sync protocol. It does not implement account login, upload, pull, or conflict resolution yet.
+This is still an E2EE sync dry-run. It can upload encrypted objects, but it does not implement account login, pull-apply, or conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 
@@ -276,7 +283,7 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 
 ## Current Limitations
 
-- No remote sync yet.
+- Remote push exists; remote pull-apply and conflict resolution are not implemented yet.
 - Server has `/healthz`, `/v1/server-info`, unauthenticated `/v1/sync/push` blind-object storage, and unauthenticated cursor-based `/v1/sync/pull`; account auth is not implemented yet.
 - OS keyring support is not implemented yet.
-- `ltd ops` only inspects the local pending operation log; `ltd sync ack` is a local dry-run helper, not a real server acknowledgement.
+- `ltd ops` only inspects the local pending operation log; `ltd sync ack` remains useful for manual dry-runs, while `ltd sync push` acknowledges accepted server uploads automatically.

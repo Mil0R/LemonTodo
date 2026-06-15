@@ -14,7 +14,7 @@ use crossterm::{
 use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::TodoStore;
-use lemontodo_sync::pack_operations;
+use lemontodo_sync::{PushRequest, PushResponse, pack_operations};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
@@ -117,6 +117,11 @@ enum ProjectCommand {
 
 #[derive(Debug, Subcommand)]
 enum SyncCommand {
+    /// Configure remote sync settings.
+    Configure {
+        #[arg(long)]
+        server_url: String,
+    },
     /// Show local sync state.
     Status,
     /// Generate a random local vault key as hex.
@@ -130,6 +135,17 @@ enum SyncCommand {
         master_password: Option<String>,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+    },
+    /// Upload pending encrypted operations to the configured server.
+    Push {
+        #[arg(long)]
+        key: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        master_password: Option<String>,
+        /// Override the configured server URL for this push.
+        #[arg(long)]
+        server_url: Option<String>,
     },
     /// Mark local pending operations as synced after a successful upload.
     Ack {
@@ -295,12 +311,23 @@ fn main() -> Result<()> {
             }
         }
         Some(Command::Sync { command }) => match command {
+            SyncCommand::Configure { server_url } => {
+                store.save_sync_server_url(&server_url)?;
+                println!(
+                    "Configured sync server {}",
+                    store.sync_server_url()?.unwrap()
+                );
+            }
             SyncCommand::Status => {
                 let pending = store.pending_operations()?.len();
                 let cursor = store
                     .last_sync_cursor()?
                     .unwrap_or_else(|| "<none>".to_owned());
+                let server = store
+                    .sync_server_url()?
+                    .unwrap_or_else(|| "<not configured>".to_owned());
                 println!("Device {}", store.device_id()?);
+                println!("Server {server}");
                 println!("Last cursor {cursor}");
                 println!("Pending operations {pending}");
             }
@@ -327,6 +354,22 @@ fn main() -> Result<()> {
                 } else {
                     println!("{json}");
                 }
+            }
+            SyncCommand::Push {
+                key,
+                master_password,
+                server_url,
+            } => {
+                let pushed = push_pending_operations(
+                    &store,
+                    key.as_deref(),
+                    master_password,
+                    server_url.as_deref(),
+                )?;
+                println!(
+                    "Pushed {} accepted, {} rejected, cursor {}",
+                    pushed.accepted, pushed.rejected, pushed.cursor
+                );
             }
             SyncCommand::Ack {
                 cursor,
@@ -382,6 +425,72 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+struct PushSummary {
+    accepted: usize,
+    rejected: usize,
+    cursor: String,
+}
+
+fn push_pending_operations(
+    store: &TodoStore,
+    key: Option<&str>,
+    master_password: Option<String>,
+    server_url: Option<&str>,
+) -> Result<PushSummary> {
+    let server_url = server_url
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .or(store.sync_server_url()?)
+        .context("sync server is not configured; run ltd sync configure --server-url <url>")?;
+    let vault_key = load_vault_key(store, key, master_password)?;
+    let operations = store.pending_operations()?;
+    if operations.is_empty() {
+        let cursor = store
+            .last_sync_cursor()?
+            .unwrap_or_else(|| "<none>".to_owned());
+        return Ok(PushSummary {
+            accepted: 0,
+            rejected: 0,
+            cursor,
+        });
+    }
+
+    let operation_ids = operations
+        .iter()
+        .map(|operation| operation.id)
+        .collect::<Vec<_>>();
+    let pack = pack_operations(&vault_key, store.device_id()?, &operations)?;
+    let request = PushRequest::from_pack(store.last_sync_cursor()?, pack);
+    let response = post_push_request(&server_url, &request)?;
+    let accepted_ids = response
+        .accepted
+        .iter()
+        .map(|accepted| accepted.operation_id)
+        .collect::<std::collections::HashSet<_>>();
+    let synced_operation_ids = operation_ids
+        .into_iter()
+        .filter(|operation_id| accepted_ids.contains(operation_id))
+        .collect::<Vec<_>>();
+    store.mark_operations_synced(&synced_operation_ids, Some(&response.cursor))?;
+
+    Ok(PushSummary {
+        accepted: response.accepted.len(),
+        rejected: response.rejected.len(),
+        cursor: response.cursor,
+    })
+}
+
+fn post_push_request(server_url: &str, request: &PushRequest) -> Result<PushResponse> {
+    let endpoint = format!("{server_url}/v1/sync/push");
+    let response = ureq::post(&endpoint)
+        .content_type("application/json")
+        .send_json(request)
+        .with_context(|| format!("failed to POST {endpoint}"))?;
+    response
+        .into_body()
+        .read_json::<PushResponse>()
+        .context("failed to parse push response")
 }
 
 fn load_vault_key(
