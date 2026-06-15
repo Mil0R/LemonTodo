@@ -13,7 +13,7 @@ use crossterm::{
 };
 use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
-use lemontodo_storage::TodoStore;
+use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
     PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse, pack_operations,
     unpack_operation,
@@ -176,7 +176,13 @@ enum SyncCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Apply safe pending remote create operations.
+    /// Inspect pending remote operations that need manual conflict handling.
+    Conflicts {
+        /// Print conflicting remote operations as pretty JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply safe pending remote operations.
     Apply,
     /// Mark local pending operations as synced after a successful upload.
     Ack {
@@ -459,24 +465,21 @@ fn main() -> Result<()> {
                 } else if pending.is_empty() {
                     println!("No pending remote operations");
                 } else {
-                    for remote in pending {
-                        let operation = remote.operation;
-                        println!(
-                            "{} {} {} rev:{} {} cursor:{} status:{}{}",
-                            short_id(&operation.id.to_string()),
-                            operation.object_type.as_str(),
-                            operation.operation_type.as_str(),
-                            operation.object_revision,
-                            operation.object_id,
-                            remote.server_cursor,
-                            remote.apply_status,
-                            remote
-                                .apply_reason
-                                .as_deref()
-                                .map(|reason| format!(" reason:{reason}"))
-                                .unwrap_or_default()
-                        );
-                    }
+                    print_remote_operations(&pending);
+                }
+            }
+            SyncCommand::Conflicts { json } => {
+                let conflicts = store.pending_remote_conflicts()?;
+                if json {
+                    let operations = conflicts
+                        .iter()
+                        .map(|remote| &remote.operation)
+                        .collect::<Vec<_>>();
+                    println!("{}", serde_json::to_string_pretty(&operations)?);
+                } else if conflicts.is_empty() {
+                    println!("No pending remote conflicts");
+                } else {
+                    print_remote_operations(&conflicts);
                 }
             }
             SyncCommand::Apply => {
@@ -844,6 +847,27 @@ impl TaskStats {
             .saturating_mul(100)
             .checked_div(self.total())
             .unwrap_or(0)
+    }
+}
+
+fn print_remote_operations(operations: &[RemoteOperation]) {
+    for remote in operations {
+        let operation = &remote.operation;
+        println!(
+            "{} {} {} rev:{} {} cursor:{} status:{}{}",
+            short_id(&operation.id.to_string()),
+            operation.object_type.as_str(),
+            operation.operation_type.as_str(),
+            operation.object_revision,
+            operation.object_id,
+            remote.server_cursor,
+            remote.apply_status,
+            remote
+                .apply_reason
+                .as_deref()
+                .map(|reason| format!(" reason:{reason}"))
+                .unwrap_or_default()
+        );
     }
 }
 

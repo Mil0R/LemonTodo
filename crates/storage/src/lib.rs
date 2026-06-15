@@ -387,6 +387,18 @@ impl TodoStore {
             .context("failed to list pending remote operations")
     }
 
+    pub fn pending_remote_conflicts(&self) -> Result<Vec<RemoteOperation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, operation_json, server_cursor, pulled_at, applied_at, apply_status, apply_reason
+             FROM remote_operations
+             WHERE applied_at IS NULL AND apply_status = 'conflict'
+             ORDER BY pulled_at ASC, operation_id ASC",
+        )?;
+        let rows = stmt.query_map([], row_to_remote_operation)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list pending remote conflicts")
+    }
+
     pub fn pending_remote_operation_count(&self) -> Result<usize> {
         self.conn
             .query_row(
@@ -2044,6 +2056,9 @@ mod tests {
             pending[0].apply_reason,
             Some("local task has pending unsynced operations".to_owned())
         );
+        let conflicts = store.pending_remote_conflicts().unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].operation.id, operation.id);
     }
 
     #[test]
@@ -2085,5 +2100,8 @@ mod tests {
             pending[0].apply_reason,
             Some("list id or name already exists locally".to_owned())
         );
+        let conflicts = store.pending_remote_conflicts().unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].operation.id, operation.id);
     }
 }
