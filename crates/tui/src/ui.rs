@@ -10,6 +10,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Mode, ViewMode};
 
+const SHORT_HELP: &str = "j/k select  space toggle  a add  e edit  m move  ? help  q quit";
+
 pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
     let chunks = Layout::default()
@@ -24,6 +26,10 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     draw_header(frame, chunks[0], app);
     draw_tasks(frame, chunks[1], app);
     draw_footer(frame, chunks[2], app);
+
+    if app.help_visible() {
+        draw_help(frame, area);
+    }
 
     if app.mode() != Mode::Browse {
         let input_width = UnicodeWidthStr::width(app.input()) as u16;
@@ -43,12 +49,6 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 }
 
 fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let help = if area.width < 100 {
-        "[] project  v view  a add e edit m move / find x archive q quit"
-    } else {
-        "[] project  v view  a add  e edit  n note  d due  t tags  m move  / search  c clear  x archive  space toggle  j/k select  q quit"
-    };
-
     let search = if app.search_query().is_empty() {
         String::new()
     } else {
@@ -68,7 +68,6 @@ fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(help, Style::default().add_modifier(Modifier::DIM)),
         Span::styled(search, Style::default().add_modifier(Modifier::ITALIC)),
     ]))
     .block(Block::default().borders(Borders::ALL));
@@ -106,9 +105,16 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
 fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let footer = match app.mode() {
-        Mode::Browse => Paragraph::new(app.message())
-            .block(Block::default().borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
+        Mode::Browse => {
+            let text = if app.message().is_empty() {
+                SHORT_HELP
+            } else {
+                app.message()
+            };
+            Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL))
+                .wrap(Wrap { trim: true })
+        }
         Mode::Add => input_footer("New task", app.input()),
         Mode::EditTitle => input_footer("Edit title", app.input()),
         Mode::EditNote => input_footer("Edit note", app.input()),
@@ -118,6 +124,55 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Mode::Search => input_footer("Search", app.input()),
     };
     frame.render_widget(footer, area);
+}
+
+fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
+    let popup = centered_rect(74, 76, area);
+    frame.render_widget(Clear, popup);
+
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "Navigation",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  j/k, Up/Down   select task"),
+        Line::from("  [, ]           switch project"),
+        Line::from("  v              compact/detail view"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Task",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  space          toggle done/open"),
+        Line::from("  a              add task"),
+        Line::from("  e              edit title"),
+        Line::from("  n              edit note"),
+        Line::from("  d              edit due date"),
+        Line::from("  t              edit tags"),
+        Line::from("  m              move to project"),
+        Line::from("  x              archive"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Search",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  /              search"),
+        Line::from("  c              clear search"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "System",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("  r              refresh"),
+        Line::from("  ?              toggle this help"),
+        Line::from("  Esc            close help"),
+        Line::from("  q              quit"),
+    ];
+
+    let help = Paragraph::new(lines)
+        .block(Block::default().title("Help").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(help, popup);
 }
 
 fn input_footer<'a>(title: &'a str, input: &'a str) -> Paragraph<'a> {

@@ -416,6 +416,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
     match app.mode() {
         Mode::Browse => match key.code {
+            KeyCode::Esc if app.help_visible() => app.hide_help(),
+            KeyCode::Char('?') => app.toggle_help(),
             KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => app.move_down(),
             KeyCode::Char('k') | KeyCode::Up => app.move_up(),

@@ -15,6 +15,7 @@ pub struct App {
     input: String,
     mode: Mode,
     view_mode: ViewMode,
+    help_visible: bool,
     message: String,
     search_query: String,
 }
@@ -55,6 +56,7 @@ impl App {
             input: String::new(),
             mode: Mode::Browse,
             view_mode: ViewMode::Compact,
+            help_visible: false,
             message: String::new(),
             search_query: String::new(),
         };
@@ -105,6 +107,10 @@ impl App {
             ViewMode::Compact => "compact",
             ViewMode::Detail => "detail",
         }
+    }
+
+    pub fn help_visible(&self) -> bool {
+        self.help_visible
     }
 
     pub fn message(&self) -> &str {
@@ -196,13 +202,23 @@ impl App {
         self.message = format!("View: {}", self.view_mode_name());
     }
 
+    pub fn toggle_help(&mut self) {
+        self.help_visible = !self.help_visible;
+    }
+
+    pub fn hide_help(&mut self) {
+        self.help_visible = false;
+    }
+
     pub fn start_add(&mut self) {
+        self.hide_help();
         self.mode = Mode::Add;
         self.input.clear();
         self.message = "Add task".to_owned();
     }
 
     pub fn start_edit_title(&mut self) {
+        self.hide_help();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -213,6 +229,7 @@ impl App {
     }
 
     pub fn start_edit_note(&mut self) {
+        self.hide_help();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -223,6 +240,7 @@ impl App {
     }
 
     pub fn start_edit_due(&mut self) {
+        self.hide_help();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -236,6 +254,7 @@ impl App {
     }
 
     pub fn start_edit_tags(&mut self) {
+        self.hide_help();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -246,6 +265,7 @@ impl App {
     }
 
     pub fn start_move_project(&mut self) {
+        self.hide_help();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -256,6 +276,7 @@ impl App {
     }
 
     pub fn start_search(&mut self) {
+        self.hide_help();
         self.input = self.search_query.clone();
         self.mode = Mode::Search;
         self.message = "Search tasks".to_owned();

@@ -156,8 +156,9 @@ TUI controls:
 - `/`: search tasks
 - `c`: clear search
 - `x`: archive selected task
+- `?`: show or hide full help
 - `Enter`: submit task while adding
-- `Esc`: cancel input mode or quit from browse mode
+- `Esc`: close help, cancel input mode, or quit from browse mode
 - `r`: refresh
 - `q`: quit
 
