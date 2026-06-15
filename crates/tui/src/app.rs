@@ -61,6 +61,7 @@ impl App {
             search_query: String::new(),
         };
         app.refresh()?;
+        app.restore_current_project()?;
         Ok(app)
     }
 
@@ -177,6 +178,7 @@ impl App {
             ProjectSelection::Project(index) => ProjectSelection::Project(index - 1),
         };
         self.message = format!("Project: {}", self.current_project_name());
+        self.save_current_project()?;
         self.refresh()
     }
 
@@ -195,6 +197,7 @@ impl App {
             ProjectSelection::Project(_) => ProjectSelection::All,
         };
         self.message = format!("Project: {}", self.current_project_name());
+        self.save_current_project()?;
         self.refresh()
     }
 
@@ -514,6 +517,27 @@ impl App {
         {
             self.current_project = ProjectSelection::All;
         }
+    }
+
+    fn restore_current_project(&mut self) -> Result<()> {
+        let Some(project_name) = self.store.tui_current_project()? else {
+            return Ok(());
+        };
+        self.current_project = if project_name == "All" {
+            ProjectSelection::All
+        } else {
+            self.projects
+                .iter()
+                .position(|project| project.name == project_name)
+                .map(ProjectSelection::Project)
+                .unwrap_or(ProjectSelection::All)
+        };
+        self.refresh()
+    }
+
+    fn save_current_project(&self) -> Result<()> {
+        self.store
+            .save_tui_current_project(self.current_project_name())
     }
 }
 

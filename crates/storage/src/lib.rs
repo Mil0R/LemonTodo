@@ -10,6 +10,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 use uuid::Uuid;
 
+const TUI_CURRENT_PROJECT_KEY: &str = "tui.current_project";
+
 pub struct TodoStore {
     conn: Connection,
 }
@@ -251,6 +253,14 @@ impl TodoStore {
                 serde_json::from_str(&value).context("failed to parse encrypted vault key")
             })
             .transpose()
+    }
+
+    pub fn save_tui_current_project(&self, project_name: &str) -> Result<()> {
+        self.set_sync_state(TUI_CURRENT_PROJECT_KEY, project_name)
+    }
+
+    pub fn tui_current_project(&self) -> Result<Option<String>> {
+        self.get_sync_state(TUI_CURRENT_PROJECT_KEY)
     }
 
     pub fn list_tasks(&self, include_done: bool) -> Result<Vec<Task>> {
@@ -976,6 +986,26 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn persists_tui_current_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lemontodo.db");
+        let store = TodoStore::open(&db_path).unwrap();
+
+        assert_eq!(store.tui_current_project().unwrap(), None);
+        store.save_tui_current_project("LemonTodo").unwrap();
+        assert_eq!(
+            store.tui_current_project().unwrap(),
+            Some("LemonTodo".to_owned())
+        );
+
+        let reopened = TodoStore::open(db_path).unwrap();
+        assert_eq!(
+            reopened.tui_current_project().unwrap(),
+            Some("LemonTodo".to_owned())
         );
     }
 }
