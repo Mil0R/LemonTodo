@@ -6,12 +6,18 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHasher, SaltString},
+};
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{DateTime, Utc};
 use lemontodo_sync::{
     AcceptedSyncObject, EncryptedSyncObject, PROTOCOL_VERSION, PullRequest, PullResponse,
-    PushRequest, PushResponse, RejectedSyncObject, RejectionReason, ServerInfo,
+    PushRequest, PushResponse, RegisterRequest, RegisterResponse, RejectedSyncObject,
+    RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo,
 };
+use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
@@ -76,18 +82,34 @@ impl ServerConfig {
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<Mutex<ServerStore>>,
+    config: ServerConfig,
 }
 
 impl AppState {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(config: ServerConfig) -> Result<Self> {
+        let mut store = ServerStore::open(&config.database_path)?;
+        store.ensure_admin_user(
+            config.admin_email.as_deref(),
+            config.admin_password.as_deref(),
+        )?;
         Ok(Self {
-            store: Arc::new(Mutex::new(ServerStore::open(path)?)),
+            store: Arc::new(Mutex::new(store)),
+            config,
         })
     }
 }
 
 pub struct ServerStore {
     conn: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAccount {
+    pub id: Uuid,
+    pub email: String,
+    pub password_hash: String,
+    pub is_admin: bool,
+    pub created_at: DateTime<Utc>,
 }
 
 impl ServerStore {
@@ -107,6 +129,59 @@ impl ServerStore {
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
+    }
+
+    pub fn ensure_admin_user(
+        &mut self,
+        admin_email: Option<&str>,
+        admin_password: Option<&str>,
+    ) -> Result<Option<UserAccount>> {
+        let Some(email) = admin_email.map(str::trim).filter(|email| !email.is_empty()) else {
+            return Ok(None);
+        };
+        let Some(password) = admin_password.filter(|password| !password.is_empty()) else {
+            return Ok(None);
+        };
+        if self.find_user_by_email(email)?.is_some() {
+            return Ok(None);
+        }
+        self.create_user(email, password, true).map(Some)
+    }
+
+    pub fn create_user(
+        &mut self,
+        email: &str,
+        password: &str,
+        is_admin: bool,
+    ) -> Result<UserAccount> {
+        let email = normalize_email(email)?;
+        let password = password.trim();
+        if password.is_empty() {
+            anyhow::bail!("password cannot be empty");
+        }
+        if self.find_user_by_email(&email)?.is_some() {
+            anyhow::bail!("user already exists: {email}");
+        }
+
+        let user = UserAccount {
+            id: Uuid::new_v4(),
+            email,
+            password_hash: hash_password(password)?,
+            is_admin,
+            created_at: Utc::now(),
+        };
+        self.conn.execute(
+            "INSERT INTO users (id, email, password_hash, is_admin, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                user.id.to_string(),
+                user.email,
+                user.password_hash,
+                user.is_admin,
+                user.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(user)
     }
 
     pub fn push(&mut self, request: PushRequest) -> Result<PushResponse> {
@@ -218,9 +293,26 @@ impl ServerStore {
             .context("failed to count sync objects")
     }
 
+    #[cfg(test)]
+    fn count_users(&self) -> Result<usize> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM users", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .context("failed to count users")
+    }
+
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(
             "
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS sync_objects (
                 server_seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 id TEXT NOT NULL,
@@ -239,9 +331,23 @@ impl ServerStore {
                 ON sync_objects(server_seq);
             CREATE INDEX IF NOT EXISTS idx_sync_objects_object
                 ON sync_objects(object_id, object_revision);
+            CREATE INDEX IF NOT EXISTS idx_users_email
+                ON users(email);
             ",
         )?;
         Ok(())
+    }
+
+    fn find_user_by_email(&self, email: &str) -> Result<Option<UserAccount>> {
+        let email = normalize_email(email)?;
+        self.conn
+            .query_row(
+                "SELECT id, email, password_hash, is_admin, created_at FROM users WHERE email = ?1",
+                params![email],
+                row_to_user_account,
+            )
+            .optional()
+            .context("failed to query user by email")
     }
 }
 
@@ -254,13 +360,17 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/server-info", get(server_info))
+        .route(
+            "/v1/account/register",
+            axum::routing::post(account_register),
+        )
         .route("/v1/sync/push", axum::routing::post(sync_push))
         .route("/v1/sync/pull", axum::routing::post(sync_pull))
         .with_state(state)
 }
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
-    let state = AppState::open(&config.database_path)?;
+    let state = AppState::open(config.clone())?;
     let listener = tokio::net::TcpListener::bind(config.bind_addr()?)
         .await
         .context("failed to bind LemonTodo server")?;
@@ -273,8 +383,53 @@ async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-async fn server_info() -> Json<ServerInfo> {
-    Json(ServerInfo::minimal())
+async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
+    let mut info = ServerInfo::minimal();
+    info.auth = ServerAuthInfo {
+        password_auth: true,
+        registration_allowed: state.config.allow_registration,
+    };
+    if state.config.allow_registration
+        && !info
+            .capabilities
+            .contains(&ServerCapability::AccountRegistration)
+    {
+        info.capabilities
+            .push(ServerCapability::AccountRegistration);
+    }
+    Json(info)
+}
+
+async fn account_register(
+    State(state): State<AppState>,
+    Json(request): Json<RegisterRequest>,
+) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
+    if !state.config.allow_registration {
+        return Err((StatusCode::FORBIDDEN, "registration is disabled".to_owned()));
+    }
+    let mut store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    let user = store
+        .create_user(&request.email, &request.password, false)
+        .map_err(|error| {
+            let message = error.to_string();
+            let status =
+                if message.contains("already exists") || message.contains("cannot be empty") {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+            (status, message)
+        })?;
+    Ok(Json(RegisterResponse {
+        user_id: user.id,
+        email: user.email,
+        is_admin: user.is_admin,
+    }))
 }
 
 async fn sync_push(
@@ -393,6 +548,25 @@ fn normalized_limit(limit: u32) -> i64 {
     i64::from(limit.min(500))
 }
 
+fn normalize_email(email: &str) -> Result<String> {
+    let email = email.trim().to_ascii_lowercase();
+    if email.is_empty() {
+        anyhow::bail!("email cannot be empty");
+    }
+    if !email.contains('@') {
+        anyhow::bail!("email must contain @");
+    }
+    Ok(email)
+}
+
+fn hash_password(password: &str) -> Result<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|error| anyhow::anyhow!("failed to hash password: {error}"))
+}
+
 fn parse_uuid(value: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&value).map_err(to_sql_error)
 }
@@ -407,12 +581,22 @@ fn to_sql_error(error: impl std::error::Error + Send + Sync + 'static) -> rusqli
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
+fn row_to_user_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserAccount> {
+    Ok(UserAccount {
+        id: parse_uuid(row.get::<_, String>(0)?)?,
+        email: row.get(1)?,
+        password_hash: row.get(2)?,
+        is_admin: row.get(3)?,
+        created_at: parse_datetime(row.get::<_, String>(4)?)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use lemontodo_crypto::CryptoEnvelope;
-    use lemontodo_sync::{PROTOCOL_VERSION, ServerCapability};
+    use lemontodo_sync::{PROTOCOL_VERSION, RegisterRequest, ServerCapability};
 
     use super::*;
 
@@ -469,9 +653,12 @@ mod tests {
             vec![
                 ServerCapability::ObjectSync,
                 ServerCapability::BatchPush,
-                ServerCapability::CursorPull
+                ServerCapability::CursorPull,
+                ServerCapability::PasswordAuth,
             ]
         );
+        assert!(info.auth.password_auth);
+        assert!(!info.auth.registration_allowed);
     }
 
     #[tokio::test]
@@ -482,16 +669,78 @@ mod tests {
 
     #[tokio::test]
     async fn server_info_handler_reports_protocol() {
-        let Json(response) = server_info().await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::open(test_server_config(dir.path().join("server.db"))).unwrap();
+        let Json(response) = server_info(State(state)).await;
         assert_eq!(response.protocol_version, PROTOCOL_VERSION);
         assert_eq!(
             response.capabilities,
             vec![
                 ServerCapability::ObjectSync,
                 ServerCapability::BatchPush,
-                ServerCapability::CursorPull
+                ServerCapability::CursorPull,
+                ServerCapability::PasswordAuth,
             ]
         );
+        assert!(response.auth.password_auth);
+        assert!(!response.auth.registration_allowed);
+    }
+
+    #[test]
+    fn bootstraps_admin_user_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("server.db");
+        let mut store = ServerStore::open(&db_path).unwrap();
+        let created = store
+            .ensure_admin_user(Some("admin@example.com"), Some("dev-password"))
+            .unwrap();
+        assert!(created.is_some());
+        assert_eq!(store.count_users().unwrap(), 1);
+
+        let created = store
+            .ensure_admin_user(Some("admin@example.com"), Some("dev-password"))
+            .unwrap();
+        assert!(created.is_none());
+        assert_eq!(store.count_users().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn register_handler_creates_user_when_registration_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+
+        let Json(response) = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "User@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.email, "user@example.com");
+        assert!(!response.is_admin);
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.count_users().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn register_handler_rejects_when_registration_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::open(test_server_config(dir.path().join("server.db"))).unwrap();
+        let error = account_register(
+            State(state),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -644,6 +893,17 @@ mod tests {
                 nonce: "nonce".to_owned(),
                 ciphertext: "ciphertext".to_owned(),
             },
+        }
+    }
+
+    fn test_server_config(database_path: PathBuf) -> ServerConfig {
+        ServerConfig {
+            host: DEFAULT_HOST.to_owned(),
+            port: DEFAULT_PORT,
+            database_path,
+            allow_registration: false,
+            admin_email: None,
+            admin_password: None,
         }
     }
 }

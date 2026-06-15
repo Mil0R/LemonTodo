@@ -1039,11 +1039,14 @@ name = "lemontodo-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "axum",
  "chrono",
  "dirs",
  "lemontodo-crypto",
  "lemontodo-sync",
+ "password-hash",
+ "rand",
  "rusqlite",
  "serde",
  "serde_json",

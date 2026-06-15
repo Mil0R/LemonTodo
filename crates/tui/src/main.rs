@@ -15,8 +15,8 @@ use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
-    PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse, pack_operations,
-    unpack_operation,
+    PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse, RegisterRequest,
+    RegisterResponse, pack_operations, unpack_operation,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -124,6 +124,19 @@ enum SyncCommand {
     Configure {
         #[arg(long)]
         server_url: String,
+        #[arg(long)]
+        email: Option<String>,
+    },
+    /// Register a server account and save the account email locally.
+    Register {
+        #[arg(long)]
+        email: String,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        password: Option<String>,
+        /// Override the configured server URL for this registration.
+        #[arg(long)]
+        server_url: Option<String>,
     },
     /// Show local sync state.
     Status,
@@ -359,12 +372,31 @@ fn main() -> Result<()> {
             }
         }
         Some(Command::Sync { command }) => match command {
-            SyncCommand::Configure { server_url } => {
+            SyncCommand::Configure { server_url, email } => {
                 store.save_sync_server_url(&server_url)?;
+                if let Some(email) = email {
+                    store.save_sync_account_email(&email)?;
+                }
                 println!(
-                    "Configured sync server {}",
-                    store.sync_server_url()?.unwrap()
+                    "Configured sync server {}{}",
+                    store.sync_server_url()?.unwrap(),
+                    store
+                        .sync_account_email()?
+                        .map(|email| format!(" account {email}"))
+                        .unwrap_or_default()
                 );
+            }
+            SyncCommand::Register {
+                email,
+                password,
+                server_url,
+            } => {
+                let password = password
+                    .map(Ok)
+                    .unwrap_or_else(prompt_new_account_password)?;
+                let response = register_account(&store, server_url.as_deref(), &email, &password)?;
+                store.save_sync_account_email(&response.email)?;
+                println!("Registered account {}", response.email);
             }
             SyncCommand::Status => {
                 let pending = store.pending_operations()?.len();
@@ -374,8 +406,12 @@ fn main() -> Result<()> {
                 let server = store
                     .sync_server_url()?
                     .unwrap_or_else(|| "<not configured>".to_owned());
+                let email = store
+                    .sync_account_email()?
+                    .unwrap_or_else(|| "<not configured>".to_owned());
                 println!("Device {}", store.device_id()?);
                 println!("Server {server}");
+                println!("Account {email}");
                 println!("Last cursor {cursor}");
                 println!("Pending operations {pending}");
                 println!(
@@ -661,6 +697,22 @@ fn pull_remote_operations(
     })
 }
 
+fn register_account(
+    store: &TodoStore,
+    server_url: Option<&str>,
+    email: &str,
+    password: &str,
+) -> Result<RegisterResponse> {
+    let server_url = configured_server_url(store, server_url)?;
+    post_register_request(
+        &server_url,
+        &RegisterRequest {
+            email: email.to_owned(),
+            password: password.to_owned(),
+        },
+    )
+}
+
 fn post_push_request(server_url: &str, request: &PushRequest) -> Result<PushResponse> {
     let endpoint = format!("{server_url}/v1/sync/push");
     let response = ureq::post(&endpoint)
@@ -683,6 +735,16 @@ fn post_pull_request(server_url: &str, request: &PullRequest) -> Result<PullResp
         .into_body()
         .read_json::<PullResponse>()
         .context("failed to parse pull response")
+}
+
+fn post_register_request(server_url: &str, request: &RegisterRequest) -> Result<RegisterResponse> {
+    let endpoint = format!("{server_url}/v1/account/register");
+    ureq::post(&endpoint)
+        .send_json(request)
+        .with_context(|| format!("failed to POST {endpoint}"))?
+        .body_mut()
+        .read_json::<RegisterResponse>()
+        .context("failed to parse register response")
 }
 
 fn configured_server_url(store: &TodoStore, override_url: Option<&str>) -> Result<String> {
@@ -726,6 +788,20 @@ fn prompt_new_master_password() -> Result<String> {
     }
     if password.is_empty() {
         anyhow::bail!("master password cannot be empty");
+    }
+    Ok(password)
+}
+
+fn prompt_new_account_password() -> Result<String> {
+    let password = rpassword::prompt_password("Account password: ")
+        .context("failed to read account password")?;
+    if password.is_empty() {
+        anyhow::bail!("account password cannot be empty");
+    }
+    let confirmation = rpassword::prompt_password("Confirm account password: ")
+        .context("failed to read account password confirmation")?;
+    if password != confirmation {
+        anyhow::bail!("account passwords did not match");
     }
     Ok(password)
 }

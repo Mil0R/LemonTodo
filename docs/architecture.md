@@ -87,6 +87,14 @@ Servers should expose a capability endpoint, for example:
 GET /v1/server-info
 ```
 
+The current MVP server also exposes:
+
+```http
+POST /v1/account/register
+POST /v1/sync/push
+POST /v1/sync/pull
+```
+
 Example response:
 
 ```json

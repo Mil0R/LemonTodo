@@ -14,6 +14,7 @@ const TUI_CURRENT_PROJECT_KEY: &str = "tui.current_project";
 const DEVICE_ID_KEY: &str = "sync.device_id";
 const LAST_SYNC_CURSOR_KEY: &str = "sync.last_cursor";
 const SYNC_SERVER_URL_KEY: &str = "sync.server_url";
+const SYNC_ACCOUNT_EMAIL_KEY: &str = "sync.account_email";
 
 pub struct TodoStore {
     conn: Connection,
@@ -334,6 +335,14 @@ impl TodoStore {
 
     pub fn sync_server_url(&self) -> Result<Option<String>> {
         self.get_sync_state(SYNC_SERVER_URL_KEY)
+    }
+
+    pub fn save_sync_account_email(&self, email: &str) -> Result<()> {
+        self.set_sync_state(SYNC_ACCOUNT_EMAIL_KEY, &normalize_email(email)?)
+    }
+
+    pub fn sync_account_email(&self) -> Result<Option<String>> {
+        self.get_sync_state(SYNC_ACCOUNT_EMAIL_KEY)
     }
 
     pub fn save_remote_operations(
@@ -1600,6 +1609,17 @@ fn normalize_server_url(url: &str) -> Result<&str> {
     Ok(url)
 }
 
+fn normalize_email(email: &str) -> Result<String> {
+    let email = email.trim().to_ascii_lowercase();
+    if email.is_empty() {
+        bail!("sync account email cannot be empty");
+    }
+    if !email.contains('@') {
+        bail!("sync account email must contain @");
+    }
+    Ok(email)
+}
+
 fn parse_uuid(value: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&value).map_err(to_sql_error)
 }
@@ -1847,6 +1867,26 @@ mod tests {
         assert_eq!(
             reopened.sync_server_url().unwrap(),
             Some("http://localhost:8787".to_owned())
+        );
+    }
+
+    #[test]
+    fn persists_sync_account_email() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lemontodo.db");
+        let store = TodoStore::open(&db_path).unwrap();
+
+        assert_eq!(store.sync_account_email().unwrap(), None);
+        store.save_sync_account_email("Admin@Example.com ").unwrap();
+        assert_eq!(
+            store.sync_account_email().unwrap(),
+            Some("admin@example.com".to_owned())
+        );
+
+        let reopened = TodoStore::open(db_path).unwrap();
+        assert_eq!(
+            reopened.sync_account_email().unwrap(),
+            Some("admin@example.com".to_owned())
         );
     }
 

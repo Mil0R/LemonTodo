@@ -23,6 +23,7 @@ impl SyncPack {
 pub struct ServerInfo {
     pub protocol_version: u32,
     pub capabilities: Vec<ServerCapability>,
+    pub auth: ServerAuthInfo,
     pub limits: ServerLimits,
 }
 
@@ -34,7 +35,12 @@ impl ServerInfo {
                 ServerCapability::ObjectSync,
                 ServerCapability::BatchPush,
                 ServerCapability::CursorPull,
+                ServerCapability::PasswordAuth,
             ],
+            auth: ServerAuthInfo {
+                password_auth: true,
+                registration_allowed: false,
+            },
             limits: ServerLimits::default(),
         }
     }
@@ -46,6 +52,14 @@ pub enum ServerCapability {
     ObjectSync,
     CursorPull,
     BatchPush,
+    PasswordAuth,
+    AccountRegistration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ServerAuthInfo {
+    pub password_auth: bool,
+    pub registration_allowed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +142,19 @@ pub struct PullResponse {
     pub cursor: String,
     pub has_more: bool,
     pub objects: Vec<EncryptedSyncObject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisterResponse {
+    pub user_id: Uuid,
+    pub email: String,
+    pub is_admin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
