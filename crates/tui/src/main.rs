@@ -14,7 +14,10 @@ use crossterm::{
 use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::TodoStore;
-use lemontodo_sync::{PushRequest, PushResponse, pack_operations};
+use lemontodo_sync::{
+    PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse, pack_operations,
+    unpack_operation,
+};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
@@ -146,6 +149,23 @@ enum SyncCommand {
         /// Override the configured server URL for this push.
         #[arg(long)]
         server_url: Option<String>,
+    },
+    /// Download and decrypt remote operations without applying them locally.
+    Pull {
+        #[arg(long)]
+        key: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        master_password: Option<String>,
+        /// Override the configured server URL for this pull.
+        #[arg(long)]
+        server_url: Option<String>,
+        /// Maximum number of encrypted objects to fetch.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        /// Print decrypted operations as pretty JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Mark local pending operations as synced after a successful upload.
     Ack {
@@ -371,6 +391,41 @@ fn main() -> Result<()> {
                     pushed.accepted, pushed.rejected, pushed.cursor
                 );
             }
+            SyncCommand::Pull {
+                key,
+                master_password,
+                server_url,
+                limit,
+                json,
+            } => {
+                let pulled = pull_remote_operations(
+                    &store,
+                    key.as_deref(),
+                    master_password,
+                    server_url.as_deref(),
+                    limit,
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&pulled.operations)?);
+                } else {
+                    println!(
+                        "Pulled {} object(s), cursor {}, has_more {}",
+                        pulled.operations.len(),
+                        pulled.cursor,
+                        pulled.has_more
+                    );
+                    for operation in &pulled.operations {
+                        println!(
+                            "{} {} {} rev:{} {}",
+                            short_id(&operation.id.to_string()),
+                            operation.object_type.as_str(),
+                            operation.operation_type.as_str(),
+                            operation.object_revision,
+                            operation.object_id
+                        );
+                    }
+                }
+            }
             SyncCommand::Ack {
                 cursor,
                 all_pending,
@@ -433,16 +488,19 @@ struct PushSummary {
     cursor: String,
 }
 
+struct PullSummary {
+    operations: Vec<lemontodo_core::Operation>,
+    cursor: String,
+    has_more: bool,
+}
+
 fn push_pending_operations(
     store: &TodoStore,
     key: Option<&str>,
     master_password: Option<String>,
     server_url: Option<&str>,
 ) -> Result<PushSummary> {
-    let server_url = server_url
-        .map(|value| value.trim().trim_end_matches('/').to_owned())
-        .or(store.sync_server_url()?)
-        .context("sync server is not configured; run ltd sync configure --server-url <url>")?;
+    let server_url = configured_server_url(store, server_url)?;
     let vault_key = load_vault_key(store, key, master_password)?;
     let operations = store.pending_operations()?;
     if operations.is_empty() {
@@ -481,6 +539,35 @@ fn push_pending_operations(
     })
 }
 
+fn pull_remote_operations(
+    store: &TodoStore,
+    key: Option<&str>,
+    master_password: Option<String>,
+    server_url: Option<&str>,
+    limit: u32,
+) -> Result<PullSummary> {
+    let server_url = configured_server_url(store, server_url)?;
+    let vault_key = load_vault_key(store, key, master_password)?;
+    let request = PullRequest {
+        protocol_version: PROTOCOL_VERSION,
+        device_id: store.device_id()?,
+        cursor: store.last_sync_cursor()?,
+        limit,
+    };
+    let response = post_pull_request(&server_url, &request)?;
+    let operations = response
+        .objects
+        .iter()
+        .map(|object| unpack_operation(&vault_key, object))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(PullSummary {
+        operations,
+        cursor: response.cursor,
+        has_more: response.has_more,
+    })
+}
+
 fn post_push_request(server_url: &str, request: &PushRequest) -> Result<PushResponse> {
     let endpoint = format!("{server_url}/v1/sync/push");
     let response = ureq::post(&endpoint)
@@ -491,6 +578,25 @@ fn post_push_request(server_url: &str, request: &PushRequest) -> Result<PushResp
         .into_body()
         .read_json::<PushResponse>()
         .context("failed to parse push response")
+}
+
+fn post_pull_request(server_url: &str, request: &PullRequest) -> Result<PullResponse> {
+    let endpoint = format!("{server_url}/v1/sync/pull");
+    let response = ureq::post(&endpoint)
+        .content_type("application/json")
+        .send_json(request)
+        .with_context(|| format!("failed to POST {endpoint}"))?;
+    response
+        .into_body()
+        .read_json::<PullResponse>()
+        .context("failed to parse pull response")
+}
+
+fn configured_server_url(store: &TodoStore, override_url: Option<&str>) -> Result<String> {
+    override_url
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .or(store.sync_server_url()?)
+        .context("sync server is not configured; run ltd sync configure --server-url <url>")
 }
 
 fn load_vault_key(

@@ -256,6 +256,13 @@ ltd sync configure --server-url http://127.0.0.1:8787
 ltd sync push
 ```
 
+Pull and decrypt remote operations without applying them locally:
+
+```bash
+ltd sync pull
+ltd sync pull --json
+```
+
 These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:
@@ -272,7 +279,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can upload encrypted objects, but it does not implement account login, pull-apply, or conflict resolution yet.
+This is still an E2EE sync dry-run. It can upload encrypted objects and decrypt pulled objects for inspection, but it does not implement account login, pull-apply, or conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 
