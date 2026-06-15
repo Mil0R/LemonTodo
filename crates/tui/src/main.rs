@@ -191,6 +191,9 @@ enum SyncCommand {
         /// Keep local data and ignore the conflicting remote operation.
         #[arg(long)]
         keep_local: bool,
+        /// Discard pending local changes for the object and apply the remote version.
+        #[arg(long)]
+        keep_remote: bool,
     },
     /// Mark local pending operations as synced after a successful upload.
     Ack {
@@ -500,11 +503,16 @@ fn main() -> Result<()> {
             SyncCommand::Resolve {
                 operation,
                 keep_local,
+                keep_remote,
             } => {
-                if !keep_local {
-                    anyhow::bail!("only --keep-local is supported right now");
+                if keep_local == keep_remote {
+                    anyhow::bail!("use exactly one of --keep-local or --keep-remote");
                 }
-                let resolved = store.resolve_remote_conflict_keep_local(&operation)?;
+                let resolved = if keep_local {
+                    store.resolve_remote_conflict_keep_local(&operation)?
+                } else {
+                    store.resolve_remote_conflict_keep_remote(&operation)?
+                };
                 println!(
                     "Resolved {} as {}",
                     short_id(&resolved.operation.id.to_string()),

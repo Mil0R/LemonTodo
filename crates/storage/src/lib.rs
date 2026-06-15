@@ -420,6 +420,39 @@ impl TodoStore {
         })
     }
 
+    pub fn resolve_remote_conflict_keep_remote(
+        &self,
+        operation_id_prefix: &str,
+    ) -> Result<RemoteOperation> {
+        let remote = self.find_pending_remote_conflict_by_operation_prefix(operation_id_prefix)?;
+        match (
+            remote.operation.object_type,
+            remote.operation.operation_type,
+        ) {
+            (ObjectType::Task, OperationType::Create) => {
+                self.discard_pending_local_operations(remote.operation.object_id)?;
+                self.force_apply_remote_task(&remote)?;
+            }
+            (ObjectType::Task, OperationType::Update | OperationType::Archive) => {
+                self.discard_pending_local_operations(remote.operation.object_id)?;
+                self.force_apply_remote_task(&remote)?;
+            }
+            _ => {
+                bail!(
+                    "keep-remote is not supported for {} {} conflicts",
+                    remote.operation.object_type.as_str(),
+                    remote.operation.operation_type.as_str()
+                );
+            }
+        }
+
+        let mut resolved = remote;
+        resolved.applied_at = Some(Utc::now());
+        resolved.apply_status = "applied".to_owned();
+        resolved.apply_reason = None;
+        Ok(resolved)
+    }
+
     pub fn pending_remote_operation_count(&self) -> Result<usize> {
         self.conn
             .query_row(
@@ -1204,35 +1237,7 @@ impl TodoStore {
             ));
         }
 
-        self.conn.execute(
-            "UPDATE tasks
-             SET list_id = ?1,
-                 revision = ?2,
-                 title = ?3,
-                 note_markdown = ?4,
-                 status = ?5,
-                 tags = ?6,
-                 due_date = ?7,
-                 sort_key = ?8,
-                 created_at = ?9,
-                 updated_at = ?10,
-                 deleted_at = ?11
-             WHERE id = ?12",
-            params![
-                task.list_id.to_string(),
-                task.revision,
-                task.title,
-                task.note_markdown,
-                task.status.as_str(),
-                serde_json::to_string(&task.tags)?,
-                task.due_date.map(|date| date.to_string()),
-                task.sort_key,
-                task.created_at.to_rfc3339(),
-                task.updated_at.to_rfc3339(),
-                task.deleted_at.map(|date| date.to_rfc3339()),
-                task.id.to_string(),
-            ],
-        )?;
+        self.update_task_from_remote(&task)?;
         self.mark_remote_operation_applied(remote.id)?;
         Ok(RemoteApplyResult::Applied)
     }
@@ -1289,6 +1294,84 @@ impl TodoStore {
                 |row| row.get::<_, bool>(0),
             )
             .context("failed to query pending local operations")
+    }
+
+    fn discard_pending_local_operations(&self, object_id: Uuid) -> Result<usize> {
+        self.conn
+            .execute(
+                "UPDATE operations
+                 SET synced_at = ?1
+                 WHERE object_id = ?2 AND synced_at IS NULL",
+                params![Utc::now().to_rfc3339(), object_id.to_string()],
+            )
+            .context("failed to discard pending local operations")
+    }
+
+    fn force_apply_remote_task(&self, remote: &RemoteOperation) -> Result<()> {
+        let task = remote_operation_payload::<Task>(&remote.operation, "task")?;
+        if self.find_list_by_id(task.list_id)?.is_none() {
+            bail!("cannot keep remote task because its list does not exist locally");
+        }
+
+        if self.find_task_any_by_id(task.id)?.is_some() {
+            self.update_task_from_remote(&task)?;
+        } else {
+            self.conn.execute(
+                "INSERT INTO tasks (
+                    id, list_id, revision, title, note_markdown, status, tags, due_date,
+                    sort_key, created_at, updated_at, deleted_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    task.id.to_string(),
+                    task.list_id.to_string(),
+                    task.revision,
+                    task.title,
+                    task.note_markdown,
+                    task.status.as_str(),
+                    serde_json::to_string(&task.tags)?,
+                    task.due_date.map(|date| date.to_string()),
+                    task.sort_key,
+                    task.created_at.to_rfc3339(),
+                    task.updated_at.to_rfc3339(),
+                    task.deleted_at.map(|date| date.to_rfc3339()),
+                ],
+            )?;
+        }
+
+        self.mark_remote_operation_applied(remote.id)
+    }
+
+    fn update_task_from_remote(&self, task: &Task) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks
+             SET list_id = ?1,
+                 revision = ?2,
+                 title = ?3,
+                 note_markdown = ?4,
+                 status = ?5,
+                 tags = ?6,
+                 due_date = ?7,
+                 sort_key = ?8,
+                 created_at = ?9,
+                 updated_at = ?10,
+                 deleted_at = ?11
+             WHERE id = ?12",
+            params![
+                task.list_id.to_string(),
+                task.revision,
+                task.title,
+                task.note_markdown,
+                task.status.as_str(),
+                serde_json::to_string(&task.tags)?,
+                task.due_date.map(|date| date.to_string()),
+                task.sort_key,
+                task.created_at.to_rfc3339(),
+                task.updated_at.to_rfc3339(),
+                task.deleted_at.map(|date| date.to_rfc3339()),
+                task.id.to_string(),
+            ],
+        )?;
+        Ok(())
     }
 
     fn find_pending_remote_conflict_by_operation_prefix(
@@ -2198,6 +2281,102 @@ mod tests {
     }
 
     #[test]
+    fn resolves_remote_conflict_by_keeping_remote_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let project = List {
+            id: Uuid::new_v4(),
+            name: "Remote Project".to_owned(),
+            revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let task = Task {
+            id: Uuid::new_v4(),
+            list_id: project.id,
+            revision: 1,
+            title: "Remote Task".to_owned(),
+            note_markdown: String::new(),
+            status: TaskStatus::Open,
+            tags: Vec::new(),
+            due_date: None,
+            sort_key: "0001".to_owned(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+        };
+        let create_operations = vec![
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: project.id,
+                object_revision: project.revision,
+                object_type: ObjectType::List,
+                operation_type: OperationType::Create,
+                payload: json!({ "list": project }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: task.id,
+                object_revision: task.revision,
+                object_type: ObjectType::Task,
+                operation_type: OperationType::Create,
+                payload: json!({ "task": task }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+        ];
+        store
+            .save_remote_operations(&create_operations, "cursor-1")
+            .unwrap();
+        store.apply_pending_remote_operations().unwrap();
+        store
+            .update_task_title_by_id(create_operations[1].object_id, "Local Pending")
+            .unwrap();
+
+        let mut updated_task = create_operations[1].payload["task"].clone();
+        updated_task["revision"] = json!(3);
+        updated_task["title"] = json!("Updated Remotely");
+        let conflict_operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: create_operations[1].object_id,
+            object_revision: 3,
+            object_type: ObjectType::Task,
+            operation_type: OperationType::Update,
+            payload: json!({ "task": updated_task }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        store
+            .save_remote_operations(std::slice::from_ref(&conflict_operation), "cursor-2")
+            .unwrap();
+        store.apply_pending_remote_operations().unwrap();
+
+        let resolved = store
+            .resolve_remote_conflict_keep_remote(&conflict_operation.id.to_string()[..8])
+            .unwrap();
+        assert_eq!(resolved.operation.id, conflict_operation.id);
+        assert_eq!(resolved.apply_status, "applied");
+        assert_eq!(resolved.apply_reason, None);
+        assert!(resolved.applied_at.is_some());
+        assert!(store.pending_remote_conflicts().unwrap().is_empty());
+        assert!(store.pending_remote_operations().unwrap().is_empty());
+
+        let tasks = store
+            .list_tasks_for_project(true, Some("Remote Project"))
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Updated Remotely");
+        assert_eq!(tasks[0].revision, 3);
+        assert!(store.pending_operations().unwrap().is_empty());
+    }
+
+    #[test]
     fn rejects_resolving_non_conflicting_remote_operation() {
         let dir = tempfile::tempdir().unwrap();
         let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
@@ -2223,6 +2402,42 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("no pending remote conflict matches id prefix"));
+    }
+
+    #[test]
+    fn rejects_keep_remote_for_list_conflicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        store.create_project("Existing").unwrap();
+        let remote_list = List {
+            id: Uuid::new_v4(),
+            name: "Existing".to_owned(),
+            revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let operation = Operation {
+            id: Uuid::new_v4(),
+            device_id: Uuid::new_v4(),
+            object_id: remote_list.id,
+            object_revision: 1,
+            object_type: ObjectType::List,
+            operation_type: OperationType::Create,
+            payload: json!({ "list": remote_list }),
+            created_at: Utc::now(),
+            synced_at: None,
+        };
+
+        store
+            .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
+            .unwrap();
+        store.apply_pending_remote_operations().unwrap();
+
+        let error = store
+            .resolve_remote_conflict_keep_remote(&operation.id.to_string()[..8])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("keep-remote is not supported for list create conflicts"));
     }
 
     #[test]
