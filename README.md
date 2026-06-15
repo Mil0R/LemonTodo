@@ -134,6 +134,8 @@ ltd archive <task-id-prefix>
 ltd export ./lemontodo.snapshot.json
 ltd import ./lemontodo.snapshot.json
 ltd ops
+ltd sync keygen
+ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ltd move <task-id-prefix> LemonTodo
 ```
 
@@ -187,9 +189,27 @@ ltd import ./lemontodo.snapshot.json
 
 Snapshots are plaintext local interchange files. They are not the final encrypted sync protocol.
 
+## Local Sync Dry Run
+
+The current `dev` branch can pack pending local operations into encrypted sync objects without contacting a server.
+
+Generate a development vault key:
+
+```bash
+ltd sync keygen
+```
+
+Use that key to create an encrypted sync pack:
+
+```bash
+ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
+```
+
+This is a local E2EE dry-run for the future sync protocol. It does not implement account login, master-password key derivation, upload, pull, or conflict resolution yet.
+
 ## Current Limitations
 
 - No remote sync yet.
-- No end-to-end encryption layer yet.
+- No master-password key derivation yet.
 - No server yet.
 - `ltd ops` only inspects the local pending operation log for future sync work.

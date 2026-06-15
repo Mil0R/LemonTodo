@@ -12,7 +12,9 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use lemontodo_core::{NewTask, Task, TaskStatus};
+use lemontodo_crypto::VaultKey;
 use lemontodo_storage::TodoStore;
+use lemontodo_sync::pack_operations;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
@@ -89,6 +91,11 @@ enum Command {
     },
     /// Inspect pending local operations for future sync.
     Ops,
+    /// Local encrypted sync dry-run commands.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
     /// Archive a task by id prefix.
     Archive { id: String },
 }
@@ -99,6 +106,19 @@ enum ProjectCommand {
     Add { name: String },
     /// List projects.
     List,
+}
+
+#[derive(Debug, Subcommand)]
+enum SyncCommand {
+    /// Generate a random local vault key as hex.
+    Keygen,
+    /// Pack pending operations into encrypted sync objects.
+    Pack {
+        #[arg(long)]
+        key: String,
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -235,6 +255,28 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Some(Command::Sync { command }) => match command {
+            SyncCommand::Keygen => {
+                println!("{}", VaultKey::generate().to_hex());
+            }
+            SyncCommand::Pack { key, out } => {
+                let vault_key = VaultKey::from_hex(&key)?;
+                let operations = store.pending_operations()?;
+                let pack = pack_operations(&vault_key, &operations)?;
+                let json = serde_json::to_string_pretty(&pack)?;
+                if let Some(path) = out {
+                    fs::write(&path, json)
+                        .with_context(|| format!("failed to write sync pack {}", path.display()))?;
+                    println!(
+                        "Packed {} encrypted sync objects to {}",
+                        pack.objects.len(),
+                        path.display()
+                    );
+                } else {
+                    println!("{json}");
+                }
+            }
+        },
         Some(Command::Archive { id }) => {
             let task = store.archive_task(&id)?;
             println!("Archived {} {}", short_id(&task.id.to_string()), task.title);
