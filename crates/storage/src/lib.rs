@@ -463,6 +463,30 @@ impl TodoStore {
             .context("failed to count pending remote operations")
     }
 
+    pub fn local_object_revision(
+        &self,
+        object_type: ObjectType,
+        object_id: Uuid,
+    ) -> Result<Option<i64>> {
+        match object_type {
+            ObjectType::Task => Ok(self
+                .find_task_any_by_id(object_id)?
+                .map(|task| task.revision)),
+            ObjectType::List => Ok(self.find_list_by_id(object_id)?.map(|list| list.revision)),
+            ObjectType::Snapshot => Ok(None),
+        }
+    }
+
+    pub fn pending_local_operation_count_for_object(&self, object_id: Uuid) -> Result<usize> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM operations WHERE object_id = ?1 AND synced_at IS NULL",
+                params![object_id.to_string()],
+                |row| row.get::<_, usize>(0),
+            )
+            .context("failed to count pending local operations for object")
+    }
+
     pub fn apply_pending_remote_operations(&self) -> Result<RemoteApplySummary> {
         let mut pending = self.pending_remote_operations()?;
         pending.sort_by_key(|remote| match remote.operation.object_type {
@@ -2190,6 +2214,18 @@ mod tests {
         let conflicts = store.pending_remote_conflicts().unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].operation.id, operation.id);
+        assert_eq!(
+            store
+                .local_object_revision(ObjectType::Task, create_operations[1].object_id)
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            store
+                .pending_local_operation_count_for_object(create_operations[1].object_id)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -2482,5 +2518,17 @@ mod tests {
         let conflicts = store.pending_remote_conflicts().unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].operation.id, operation.id);
+        assert_eq!(
+            store
+                .local_object_revision(ObjectType::List, remote_list.id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .pending_local_operation_count_for_object(remote_list.id)
+                .unwrap(),
+            0
+        );
     }
 }

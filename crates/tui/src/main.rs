@@ -476,7 +476,7 @@ fn main() -> Result<()> {
                 } else if pending.is_empty() {
                     println!("No pending remote operations");
                 } else {
-                    print_remote_operations(&pending);
+                    print_remote_operations(&store, &pending)?;
                 }
             }
             SyncCommand::Conflicts { json } => {
@@ -490,7 +490,7 @@ fn main() -> Result<()> {
                 } else if conflicts.is_empty() {
                     println!("No pending remote conflicts");
                 } else {
-                    print_remote_operations(&conflicts);
+                    print_remote_operations(&store, &conflicts)?;
                 }
             }
             SyncCommand::Apply => {
@@ -880,15 +880,22 @@ impl TaskStats {
     }
 }
 
-fn print_remote_operations(operations: &[RemoteOperation]) {
+fn print_remote_operations(store: &TodoStore, operations: &[RemoteOperation]) -> Result<()> {
     for remote in operations {
         let operation = &remote.operation;
+        let local_revision =
+            store.local_object_revision(operation.object_type, operation.object_id)?;
+        let pending_local = store.pending_local_operation_count_for_object(operation.object_id)?;
         println!(
-            "{} {} {} rev:{} {} cursor:{} status:{}{}",
+            "{} {} {} remote-rev:{} local-rev:{} local-pending:{} {} cursor:{} status:{}{}",
             short_id(&operation.id.to_string()),
             operation.object_type.as_str(),
             operation.operation_type.as_str(),
             operation.object_revision,
+            local_revision
+                .map(|revision| revision.to_string())
+                .unwrap_or_else(|| "none".to_owned()),
+            pending_local,
             operation.object_id,
             remote.server_cursor,
             remote.apply_status,
@@ -899,6 +906,7 @@ fn print_remote_operations(operations: &[RemoteOperation]) {
                 .unwrap_or_default()
         );
     }
+    Ok(())
 }
 
 fn print_stats(store: &TodoStore) -> Result<()> {

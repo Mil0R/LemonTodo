@@ -268,8 +268,8 @@ ltd sync apply
 ltd sync pull --json
 ```
 
-`ltd sync inbox` shows each pending remote operation with its apply status and skip/conflict reason when available.
-`ltd sync conflicts` narrows the inbox to pending remote conflicts that need manual handling.
+`ltd sync inbox` shows each pending remote operation with apply status, remote/local revision, local pending-op count, and skip/conflict reason when available.
+`ltd sync conflicts` narrows the inbox to pending remote conflicts that need manual handling and shows the same revision context.
 `ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
 These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
