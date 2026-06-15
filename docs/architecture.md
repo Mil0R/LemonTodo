@@ -92,6 +92,7 @@ The current MVP server also exposes:
 ```http
 POST /v1/account/register
 POST /v1/account/login
+POST /v1/account/logout
 POST /v1/sync/push
 POST /v1/sync/pull
 ```

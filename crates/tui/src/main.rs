@@ -15,8 +15,9 @@ use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
-    LoginRequest, LoginResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest,
-    PushResponse, RegisterRequest, RegisterResponse, pack_operations, unpack_operation,
+    LoginRequest, LoginResponse, LogoutRequest, LogoutResponse, PROTOCOL_VERSION, PullRequest,
+    PullResponse, PushRequest, PushResponse, RegisterRequest, RegisterResponse, pack_operations,
+    unpack_operation,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -146,6 +147,15 @@ enum SyncCommand {
         #[arg(long)]
         password: Option<String>,
         /// Override the configured server URL for this login.
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Revoke the current server session and clear the local access token.
+    Logout {
+        /// Only clear the local token without calling the server.
+        #[arg(long)]
+        local_only: bool,
+        /// Override the configured server URL for this logout.
         #[arg(long)]
         server_url: Option<String>,
     },
@@ -422,6 +432,28 @@ fn main() -> Result<()> {
                 store.save_sync_account_email(&response.email)?;
                 store.save_sync_access_token(&response.access_token)?;
                 println!("Logged in as {}", response.email);
+            }
+            SyncCommand::Logout {
+                local_only,
+                server_url,
+            } => {
+                let token = store
+                    .sync_access_token()?
+                    .context("sync access token is not configured; run ltd sync login")?;
+                let revoked = if local_only {
+                    false
+                } else {
+                    logout_account(&store, server_url.as_deref(), &token)?.revoked
+                };
+                store.clear_sync_access_token()?;
+                println!(
+                    "Logged out{}",
+                    if revoked {
+                        " and revoked remote session"
+                    } else {
+                        ""
+                    }
+                );
             }
             SyncCommand::Status => {
                 let pending = store.pending_operations()?.len();
@@ -765,6 +797,20 @@ fn login_account(
     )
 }
 
+fn logout_account(
+    store: &TodoStore,
+    server_url: Option<&str>,
+    access_token: &str,
+) -> Result<LogoutResponse> {
+    let server_url = configured_server_url(store, server_url)?;
+    post_logout_request(
+        &server_url,
+        &LogoutRequest {
+            access_token: access_token.to_owned(),
+        },
+    )
+}
+
 fn post_push_request(server_url: &str, request: &PushRequest) -> Result<PushResponse> {
     let endpoint = format!("{server_url}/v1/sync/push");
     let response = ureq::post(&endpoint)
@@ -807,6 +853,16 @@ fn post_login_request(server_url: &str, request: &LoginRequest) -> Result<LoginR
         .body_mut()
         .read_json::<LoginResponse>()
         .context("failed to parse login response")
+}
+
+fn post_logout_request(server_url: &str, request: &LogoutRequest) -> Result<LogoutResponse> {
+    let endpoint = format!("{server_url}/v1/account/logout");
+    ureq::post(&endpoint)
+        .send_json(request)
+        .with_context(|| format!("failed to POST {endpoint}"))?
+        .body_mut()
+        .read_json::<LogoutResponse>()
+        .context("failed to parse logout response")
 }
 
 fn configured_server_url(store: &TodoStore, override_url: Option<&str>) -> Result<String> {

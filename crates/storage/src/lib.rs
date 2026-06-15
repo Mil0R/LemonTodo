@@ -358,6 +358,16 @@ impl TodoStore {
         self.get_sync_state(SYNC_ACCESS_TOKEN_KEY)
     }
 
+    pub fn clear_sync_access_token(&self) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM sync_state WHERE key = ?1",
+                params![SYNC_ACCESS_TOKEN_KEY],
+            )
+            .context("failed to clear sync access token")?;
+        Ok(())
+    }
+
     pub fn save_remote_operations(
         &self,
         operations: &[Operation],
@@ -1803,7 +1813,7 @@ mod tests {
             Some("LemonTodo".to_owned())
         );
 
-        let reopened = TodoStore::open(db_path).unwrap();
+        let reopened = TodoStore::open(&db_path).unwrap();
         assert_eq!(
             reopened.tui_current_project().unwrap(),
             Some("LemonTodo".to_owned())
@@ -1853,7 +1863,7 @@ mod tests {
             Some("server-cursor-2".to_owned())
         );
 
-        let reopened = TodoStore::open(db_path).unwrap();
+        let reopened = TodoStore::open(&db_path).unwrap();
         assert_eq!(reopened.device_id().unwrap(), device_id);
         assert_eq!(
             reopened.last_sync_cursor().unwrap(),
@@ -1876,7 +1886,7 @@ mod tests {
             Some("http://localhost:8787".to_owned())
         );
 
-        let reopened = TodoStore::open(db_path).unwrap();
+        let reopened = TodoStore::open(&db_path).unwrap();
         assert_eq!(
             reopened.sync_server_url().unwrap(),
             Some("http://localhost:8787".to_owned())
@@ -1896,7 +1906,7 @@ mod tests {
             Some("admin@example.com".to_owned())
         );
 
-        let reopened = TodoStore::open(db_path).unwrap();
+        let reopened = TodoStore::open(&db_path).unwrap();
         assert_eq!(
             reopened.sync_account_email().unwrap(),
             Some("admin@example.com".to_owned())
@@ -1916,11 +1926,17 @@ mod tests {
             Some("token-123".to_owned())
         );
 
-        let reopened = TodoStore::open(db_path).unwrap();
+        let reopened = TodoStore::open(&db_path).unwrap();
         assert_eq!(
             reopened.sync_access_token().unwrap(),
             Some("token-123".to_owned())
         );
+
+        reopened.clear_sync_access_token().unwrap();
+        assert_eq!(reopened.sync_access_token().unwrap(), None);
+
+        let reopened = TodoStore::open(&db_path).unwrap();
+        assert_eq!(reopened.sync_access_token().unwrap(), None);
     }
 
     #[test]

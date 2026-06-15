@@ -13,9 +13,10 @@ use argon2::{
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{DateTime, Utc};
 use lemontodo_sync::{
-    AcceptedSyncObject, EncryptedSyncObject, LoginRequest, LoginResponse, PROTOCOL_VERSION,
-    PullRequest, PullResponse, PushRequest, PushResponse, RegisterRequest, RegisterResponse,
-    RejectedSyncObject, RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo,
+    AcceptedSyncObject, EncryptedSyncObject, LoginRequest, LoginResponse, LogoutRequest,
+    LogoutResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse,
+    RegisterRequest, RegisterResponse, RejectedSyncObject, RejectionReason, ServerAuthInfo,
+    ServerCapability, ServerInfo,
 };
 use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -218,6 +219,18 @@ impl ServerStore {
             .with_context(|| "invalid access token".to_owned())?;
         self.find_user_by_id(session.user_id)?
             .with_context(|| format!("session user does not exist: {}", session.user_id))
+    }
+
+    pub fn revoke_session(&mut self, access_token: &str) -> Result<bool> {
+        let token = access_token.trim();
+        if token.is_empty() {
+            anyhow::bail!("access token cannot be empty");
+        }
+        let deleted = self
+            .conn
+            .execute("DELETE FROM user_sessions WHERE token = ?1", params![token])
+            .context("failed to revoke session")?;
+        Ok(deleted > 0)
     }
 
     pub fn push(&mut self, user_id: Uuid, request: PushRequest) -> Result<PushResponse> {
@@ -448,6 +461,7 @@ pub fn app(state: AppState) -> Router {
             axum::routing::post(account_register),
         )
         .route("/v1/account/login", axum::routing::post(account_login))
+        .route("/v1/account/logout", axum::routing::post(account_logout))
         .route("/v1/sync/push", axum::routing::post(sync_push))
         .route("/v1/sync/pull", axum::routing::post(sync_pull))
         .with_state(state)
@@ -540,6 +554,22 @@ async fn account_login(
         email: user.email,
         access_token: session.token,
     }))
+}
+
+async fn account_logout(
+    State(state): State<AppState>,
+    Json(request): Json<LogoutRequest>,
+) -> Result<Json<LogoutResponse>, (StatusCode, String)> {
+    let mut store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    let revoked = store
+        .revoke_session(&request.access_token)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    Ok(Json(LogoutResponse { revoked }))
 }
 
 async fn sync_push(
@@ -753,7 +783,9 @@ mod tests {
     use std::collections::HashMap;
 
     use lemontodo_crypto::CryptoEnvelope;
-    use lemontodo_sync::{LoginRequest, PROTOCOL_VERSION, RegisterRequest, ServerCapability};
+    use lemontodo_sync::{
+        LoginRequest, LogoutRequest, PROTOCOL_VERSION, RegisterRequest, ServerCapability,
+    };
 
     use super::*;
 
@@ -928,6 +960,45 @@ mod tests {
 
         assert_eq!(response.email, "user@example.com");
         assert!(!response.access_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn logout_handler_revokes_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(login) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(response) = account_logout(
+            State(state.clone()),
+            Json(LogoutRequest {
+                access_token: login.access_token.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.revoked);
+        let store = state.store.lock().unwrap();
+        assert!(store.authenticate(&login.access_token).is_err());
     }
 
     #[test]

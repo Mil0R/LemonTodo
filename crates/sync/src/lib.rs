@@ -174,6 +174,16 @@ pub struct LoginResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogoutRequest {
+    pub access_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogoutResponse {
+    pub revoked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedSyncObject {
     pub id: Uuid,
     pub operation_id: Uuid,
