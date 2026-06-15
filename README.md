@@ -74,6 +74,7 @@ Available server endpoints:
 ```text
 GET /healthz
 GET /v1/server-info
+POST /v1/sync/push
 ```
 
 Server environment variables:
@@ -81,6 +82,7 @@ Server environment variables:
 ```text
 LEMONTODO_SERVER_HOST=127.0.0.1
 LEMONTODO_SERVER_PORT=8787
+LEMONTODO_SERVER_DB=<platform-data-dir>/lemontodo-server/server.db
 LEMONTODO_ALLOW_REGISTRATION=false
 LEMONTODO_ADMIN_EMAIL=
 LEMONTODO_ADMIN_PASSWORD=
@@ -274,6 +276,6 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 ## Current Limitations
 
 - No remote sync yet.
-- Server has only `/healthz` and `/v1/server-info`; account auth and remote sync storage are not implemented yet.
+- Server has `/healthz`, `/v1/server-info`, and unauthenticated `/v1/sync/push` blind-object storage; account auth and pull sync are not implemented yet.
 - OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log; `ltd sync ack` is a local dry-run helper, not a real server acknowledgement.

@@ -857,9 +857,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
+ "dirs",
+ "lemontodo-crypto",
  "lemontodo-sync",
+ "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
