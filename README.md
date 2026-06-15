@@ -75,6 +75,7 @@ Available server endpoints:
 GET /healthz
 GET /v1/server-info
 POST /v1/account/register
+POST /v1/account/login
 POST /v1/sync/push
 POST /v1/sync/pull
 ```
@@ -135,6 +136,7 @@ cargo run -p lemontodo-tui -- import ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- ops
 cargo run -p lemontodo-tui -- sync configure --server-url http://127.0.0.1:8787 --email you@example.com
 cargo run -p lemontodo-tui -- sync register --email you@example.com
+cargo run -p lemontodo-tui -- sync login --email you@example.com
 cargo run -p lemontodo-tui -- move <task-id-prefix> LemonTodo
 cargo run -p lemontodo-tui -- done <task-id-prefix>
 cargo run -p lemontodo-tui -- archive <task-id-prefix>
@@ -173,6 +175,7 @@ ltd vault status
 ltd sync pack --out ./sync-pack.json
 ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
 ltd sync register --email you@example.com
+ltd sync login --email you@example.com
 ltd sync status
 ltd move <task-id-prefix> LemonTodo
 ```
@@ -260,6 +263,7 @@ Configure a sync server and push pending encrypted operations:
 ```bash
 ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
 ltd sync register --email you@example.com
+ltd sync login --email you@example.com
 ltd sync push
 ```
 
@@ -279,8 +283,8 @@ ltd sync pull --json
 `ltd sync conflicts` narrows the inbox to pending remote conflicts that need manual handling and shows the same revision context.
 `ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
-`ltd sync status` shows the configured server account email when present.
-These commands prompt for the master password without echoing it to the terminal. Registration also prompts for the account password without echoing it. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
+`ltd sync status` shows the configured server account email and whether an access token is stored locally.
+These commands prompt for the master password without echoing it to the terminal. Registration and login also prompt for the account password without echoing it. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:
 
@@ -296,7 +300,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can register password-based server accounts, bootstrap an admin from server environment variables, upload encrypted objects, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement authenticated sync requests, account login sessions, or full conflict resolution yet.
+This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement logout, session expiry management, encrypted vault metadata sync, or full conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 
@@ -308,6 +312,6 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 ## Current Limitations
 
 - Remote push exists; remote pull stores pending remote operations, and apply handles safe remote creates plus safe task updates/archives.
-- Server has `/healthz`, `/v1/server-info`, `/v1/account/register`, unauthenticated `/v1/sync/push` blind-object storage, and unauthenticated cursor-based `/v1/sync/pull`; password accounts exist but sync requests are not authenticated yet.
+- Server has `/healthz`, `/v1/server-info`, `/v1/account/register`, `/v1/account/login`, and token-authenticated `/v1/sync/push` and `/v1/sync/pull`; encrypted vault metadata and device/session management are not implemented yet.
 - OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log; `ltd sync ack` remains useful for manual dry-runs, while `ltd sync push` acknowledges accepted server uploads automatically.

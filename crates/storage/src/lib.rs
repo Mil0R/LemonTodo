@@ -15,6 +15,7 @@ const DEVICE_ID_KEY: &str = "sync.device_id";
 const LAST_SYNC_CURSOR_KEY: &str = "sync.last_cursor";
 const SYNC_SERVER_URL_KEY: &str = "sync.server_url";
 const SYNC_ACCOUNT_EMAIL_KEY: &str = "sync.account_email";
+const SYNC_ACCESS_TOKEN_KEY: &str = "sync.access_token";
 
 pub struct TodoStore {
     conn: Connection,
@@ -343,6 +344,18 @@ impl TodoStore {
 
     pub fn sync_account_email(&self) -> Result<Option<String>> {
         self.get_sync_state(SYNC_ACCOUNT_EMAIL_KEY)
+    }
+
+    pub fn save_sync_access_token(&self, access_token: &str) -> Result<()> {
+        let access_token = access_token.trim();
+        if access_token.is_empty() {
+            bail!("sync access token cannot be empty");
+        }
+        self.set_sync_state(SYNC_ACCESS_TOKEN_KEY, access_token)
+    }
+
+    pub fn sync_access_token(&self) -> Result<Option<String>> {
+        self.get_sync_state(SYNC_ACCESS_TOKEN_KEY)
     }
 
     pub fn save_remote_operations(
@@ -1887,6 +1900,26 @@ mod tests {
         assert_eq!(
             reopened.sync_account_email().unwrap(),
             Some("admin@example.com".to_owned())
+        );
+    }
+
+    #[test]
+    fn persists_sync_access_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("lemontodo.db");
+        let store = TodoStore::open(&db_path).unwrap();
+
+        assert_eq!(store.sync_access_token().unwrap(), None);
+        store.save_sync_access_token("token-123").unwrap();
+        assert_eq!(
+            store.sync_access_token().unwrap(),
+            Some("token-123".to_owned())
+        );
+
+        let reopened = TodoStore::open(db_path).unwrap();
+        assert_eq!(
+            reopened.sync_access_token().unwrap(),
+            Some("token-123".to_owned())
         );
     }
 

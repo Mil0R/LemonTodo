@@ -15,8 +15,8 @@ use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
-    PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse, RegisterRequest,
-    RegisterResponse, pack_operations, unpack_operation,
+    LoginRequest, LoginResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest,
+    PushResponse, RegisterRequest, RegisterResponse, pack_operations, unpack_operation,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -135,6 +135,17 @@ enum SyncCommand {
         #[arg(long)]
         password: Option<String>,
         /// Override the configured server URL for this registration.
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Log into a server account and save the access token locally.
+    Login {
+        #[arg(long)]
+        email: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        password: Option<String>,
+        /// Override the configured server URL for this login.
         #[arg(long)]
         server_url: Option<String>,
     },
@@ -398,6 +409,20 @@ fn main() -> Result<()> {
                 store.save_sync_account_email(&response.email)?;
                 println!("Registered account {}", response.email);
             }
+            SyncCommand::Login {
+                email,
+                password,
+                server_url,
+            } => {
+                let email = email
+                    .or(store.sync_account_email()?)
+                    .context("sync account email is not configured; pass --email or run ltd sync configure --email <email>")?;
+                let password = password.map(Ok).unwrap_or_else(prompt_account_password)?;
+                let response = login_account(&store, server_url.as_deref(), &email, &password)?;
+                store.save_sync_account_email(&response.email)?;
+                store.save_sync_access_token(&response.access_token)?;
+                println!("Logged in as {}", response.email);
+            }
             SyncCommand::Status => {
                 let pending = store.pending_operations()?.len();
                 let cursor = store
@@ -409,9 +434,15 @@ fn main() -> Result<()> {
                 let email = store
                     .sync_account_email()?
                     .unwrap_or_else(|| "<not configured>".to_owned());
+                let token = if store.sync_access_token()?.is_some() {
+                    "configured"
+                } else {
+                    "<not configured>"
+                };
                 println!("Device {}", store.device_id()?);
                 println!("Server {server}");
                 println!("Account {email}");
+                println!("Access token {token}");
                 println!("Last cursor {cursor}");
                 println!("Pending operations {pending}");
                 println!(
@@ -648,7 +679,11 @@ fn push_pending_operations(
         .map(|operation| operation.id)
         .collect::<Vec<_>>();
     let pack = pack_operations(&vault_key, store.device_id()?, &operations)?;
-    let request = PushRequest::from_pack(store.last_sync_cursor()?, pack);
+    let request = PushRequest::from_pack(
+        configured_access_token(store)?,
+        store.last_sync_cursor()?,
+        pack,
+    );
     let response = post_push_request(&server_url, &request)?;
     let accepted_ids = response
         .accepted
@@ -680,6 +715,7 @@ fn pull_remote_operations(
     let request = PullRequest {
         protocol_version: PROTOCOL_VERSION,
         device_id: store.device_id()?,
+        access_token: configured_access_token(store)?,
         cursor: store.last_sync_cursor()?,
         limit,
     };
@@ -707,6 +743,22 @@ fn register_account(
     post_register_request(
         &server_url,
         &RegisterRequest {
+            email: email.to_owned(),
+            password: password.to_owned(),
+        },
+    )
+}
+
+fn login_account(
+    store: &TodoStore,
+    server_url: Option<&str>,
+    email: &str,
+    password: &str,
+) -> Result<LoginResponse> {
+    let server_url = configured_server_url(store, server_url)?;
+    post_login_request(
+        &server_url,
+        &LoginRequest {
             email: email.to_owned(),
             password: password.to_owned(),
         },
@@ -747,11 +799,27 @@ fn post_register_request(server_url: &str, request: &RegisterRequest) -> Result<
         .context("failed to parse register response")
 }
 
+fn post_login_request(server_url: &str, request: &LoginRequest) -> Result<LoginResponse> {
+    let endpoint = format!("{server_url}/v1/account/login");
+    ureq::post(&endpoint)
+        .send_json(request)
+        .with_context(|| format!("failed to POST {endpoint}"))?
+        .body_mut()
+        .read_json::<LoginResponse>()
+        .context("failed to parse login response")
+}
+
 fn configured_server_url(store: &TodoStore, override_url: Option<&str>) -> Result<String> {
     override_url
         .map(|value| value.trim().trim_end_matches('/').to_owned())
         .or(store.sync_server_url()?)
         .context("sync server is not configured; run ltd sync configure --server-url <url>")
+}
+
+fn configured_access_token(store: &TodoStore) -> Result<String> {
+    store
+        .sync_access_token()?
+        .context("sync access token is not configured; run ltd sync login")
 }
 
 fn load_vault_key(
@@ -802,6 +870,15 @@ fn prompt_new_account_password() -> Result<String> {
         .context("failed to read account password confirmation")?;
     if password != confirmation {
         anyhow::bail!("account passwords did not match");
+    }
+    Ok(password)
+}
+
+fn prompt_account_password() -> Result<String> {
+    let password = rpassword::prompt_password("Account password: ")
+        .context("failed to read account password")?;
+    if password.is_empty() {
+        anyhow::bail!("account password cannot be empty");
     }
     Ok(password)
 }

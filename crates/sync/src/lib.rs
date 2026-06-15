@@ -83,15 +83,17 @@ impl Default for ServerLimits {
 pub struct PushRequest {
     pub protocol_version: u32,
     pub device_id: Uuid,
+    pub access_token: String,
     pub base_cursor: Option<String>,
     pub objects: Vec<EncryptedSyncObject>,
 }
 
 impl PushRequest {
-    pub fn from_pack(base_cursor: Option<String>, pack: SyncPack) -> Self {
+    pub fn from_pack(access_token: String, base_cursor: Option<String>, pack: SyncPack) -> Self {
         Self {
             protocol_version: pack.version,
             device_id: pack.device_id,
+            access_token,
             base_cursor,
             objects: pack.objects,
         }
@@ -132,6 +134,7 @@ pub enum RejectionReason {
 pub struct PullRequest {
     pub protocol_version: u32,
     pub device_id: Uuid,
+    pub access_token: String,
     pub cursor: Option<String>,
     pub limit: u32,
 }
@@ -155,6 +158,19 @@ pub struct RegisterResponse {
     pub user_id: Uuid,
     pub email: String,
     pub is_admin: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginResponse {
+    pub user_id: Uuid,
+    pub email: String,
+    pub access_token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,10 +298,12 @@ mod tests {
 
         let pack =
             pack_operations(&key, operation.device_id, std::slice::from_ref(&operation)).unwrap();
-        let request = PushRequest::from_pack(Some("cursor-1".to_owned()), pack);
+        let request =
+            PushRequest::from_pack("token-1".to_owned(), Some("cursor-1".to_owned()), pack);
 
         assert_eq!(request.protocol_version, PROTOCOL_VERSION);
         assert_eq!(request.device_id, operation.device_id);
+        assert_eq!(request.access_token, "token-1");
         assert_eq!(request.base_cursor, Some("cursor-1".to_owned()));
         assert_eq!(request.objects.len(), 1);
         assert_eq!(request.objects[0].operation_id, operation.id);
@@ -304,12 +322,14 @@ mod tests {
         let pull = PullRequest {
             protocol_version: PROTOCOL_VERSION,
             device_id: Uuid::nil(),
+            access_token: "token-2".to_owned(),
             cursor: Some("cursor-2".to_owned()),
             limit: 100,
         };
         let json = serde_json::to_value(&pull).unwrap();
         assert_eq!(json["protocol_version"], PROTOCOL_VERSION);
         assert_eq!(json["device_id"], Uuid::nil().to_string());
+        assert_eq!(json["access_token"], "token-2");
         assert_eq!(json["cursor"], "cursor-2");
         assert_eq!(json["limit"], 100);
 

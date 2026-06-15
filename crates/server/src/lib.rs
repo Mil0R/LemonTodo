@@ -8,14 +8,14 @@ use std::{
 use anyhow::{Context, Result};
 use argon2::{
     Argon2,
-    password_hash::{PasswordHasher, SaltString},
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{DateTime, Utc};
 use lemontodo_sync::{
-    AcceptedSyncObject, EncryptedSyncObject, PROTOCOL_VERSION, PullRequest, PullResponse,
-    PushRequest, PushResponse, RegisterRequest, RegisterResponse, RejectedSyncObject,
-    RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo,
+    AcceptedSyncObject, EncryptedSyncObject, LoginRequest, LoginResponse, PROTOCOL_VERSION,
+    PullRequest, PullResponse, PushRequest, PushResponse, RegisterRequest, RegisterResponse,
+    RejectedSyncObject, RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo,
 };
 use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -112,6 +112,14 @@ pub struct UserAccount {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSession {
+    pub token: String,
+    pub user_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: DateTime<Utc>,
+}
+
 impl ServerStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -184,7 +192,35 @@ impl ServerStore {
         Ok(user)
     }
 
-    pub fn push(&mut self, request: PushRequest) -> Result<PushResponse> {
+    pub fn create_session(&mut self, user: &UserAccount) -> Result<UserSession> {
+        let session = UserSession {
+            token: Uuid::new_v4().to_string(),
+            user_id: user.id,
+            created_at: Utc::now(),
+            last_used_at: Utc::now(),
+        };
+        self.conn.execute(
+            "INSERT INTO user_sessions (token, user_id, created_at, last_used_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session.token,
+                session.user_id.to_string(),
+                session.created_at.to_rfc3339(),
+                session.last_used_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(session)
+    }
+
+    pub fn authenticate(&self, access_token: &str) -> Result<UserAccount> {
+        let session = self
+            .find_session(access_token)?
+            .with_context(|| "invalid access token".to_owned())?;
+        self.find_user_by_id(session.user_id)?
+            .with_context(|| format!("session user does not exist: {}", session.user_id))
+    }
+
+    pub fn push(&mut self, user_id: Uuid, request: PushRequest) -> Result<PushResponse> {
         if request.protocol_version != PROTOCOL_VERSION {
             return Ok(PushResponse {
                 protocol_version: PROTOCOL_VERSION,
@@ -197,7 +233,7 @@ impl ServerStore {
                         reason: RejectionReason::UnsupportedProtocol,
                     })
                     .collect(),
-                cursor: self.current_cursor()?,
+                cursor: self.current_cursor(user_id)?,
             });
         }
 
@@ -205,7 +241,7 @@ impl ServerStore {
         let mut rejected = Vec::new();
         let tx = self.conn.transaction()?;
         for object in request.objects {
-            if has_operation(&tx, object.operation_id)? {
+            if has_operation(&tx, user_id, object.operation_id)? {
                 rejected.push(RejectedSyncObject {
                     operation_id: object.operation_id,
                     reason: RejectionReason::Duplicate,
@@ -213,7 +249,7 @@ impl ServerStore {
                 continue;
             }
 
-            insert_sync_object(&tx, &object)?;
+            insert_sync_object(&tx, user_id, &object)?;
             accepted.push(AcceptedSyncObject {
                 operation_id: object.operation_id,
                 object_id: object.object_id,
@@ -226,12 +262,12 @@ impl ServerStore {
             protocol_version: PROTOCOL_VERSION,
             accepted,
             rejected,
-            cursor: self.current_cursor()?,
+            cursor: self.current_cursor(user_id)?,
         })
     }
 
-    pub fn pull(&self, request: PullRequest) -> Result<PullResponse> {
-        let current_cursor = self.current_cursor()?;
+    pub fn pull(&self, user_id: Uuid, request: PullRequest) -> Result<PullResponse> {
+        let current_cursor = self.current_cursor(user_id)?;
         if request.protocol_version != PROTOCOL_VERSION {
             return Ok(PullResponse {
                 protocol_version: PROTOCOL_VERSION,
@@ -245,14 +281,17 @@ impl ServerStore {
         let limit = normalized_limit(request.limit);
         let mut stmt = self.conn.prepare(
             "SELECT
-                server_seq, id, operation_id, device_id, object_id, object_revision,
+                server_seq, user_id, id, operation_id, device_id, object_id, object_revision,
                 object_type, operation_type, created_at, envelope
              FROM sync_objects
-             WHERE server_seq > ?1
+             WHERE user_id = ?1 AND server_seq > ?2
              ORDER BY server_seq ASC
-             LIMIT ?2",
+             LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![cursor, limit + 1], row_to_sync_object)?;
+        let rows = stmt.query_map(
+            params![user_id.to_string(), cursor, limit + 1],
+            row_to_sync_object,
+        )?;
         let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         let has_more = rows.len() > limit as usize;
         if has_more {
@@ -272,12 +311,12 @@ impl ServerStore {
         })
     }
 
-    fn current_cursor(&self) -> Result<String> {
+    fn current_cursor(&self, user_id: Uuid) -> Result<String> {
         let seq = self
             .conn
             .query_row(
-                "SELECT COALESCE(MAX(server_seq), 0) FROM sync_objects",
-                [],
+                "SELECT COALESCE(MAX(server_seq), 0) FROM sync_objects WHERE user_id = ?1",
+                params![user_id.to_string()],
                 |row| row.get::<_, i64>(0),
             )
             .context("failed to read server cursor")?;
@@ -315,6 +354,7 @@ impl ServerStore {
 
             CREATE TABLE IF NOT EXISTS sync_objects (
                 server_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
                 id TEXT NOT NULL,
                 operation_id TEXT NOT NULL UNIQUE,
                 device_id TEXT NOT NULL,
@@ -327,15 +367,43 @@ impl ServerStore {
                 envelope TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_sync_objects_cursor
                 ON sync_objects(server_seq);
             CREATE INDEX IF NOT EXISTS idx_sync_objects_object
                 ON sync_objects(object_id, object_revision);
+            CREATE INDEX IF NOT EXISTS idx_sync_objects_user_cursor
+                ON sync_objects(user_id, server_seq);
             CREATE INDEX IF NOT EXISTS idx_users_email
                 ON users(email);
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_user
+                ON user_sessions(user_id);
             ",
         )?;
+        add_column_if_missing(
+            &self.conn,
+            "sync_objects",
+            "user_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
         Ok(())
+    }
+
+    fn find_user_by_id(&self, id: Uuid) -> Result<Option<UserAccount>> {
+        self.conn
+            .query_row(
+                "SELECT id, email, password_hash, is_admin, created_at FROM users WHERE id = ?1",
+                params![id.to_string()],
+                row_to_user_account,
+            )
+            .optional()
+            .context("failed to query user by id")
     }
 
     fn find_user_by_email(&self, email: &str) -> Result<Option<UserAccount>> {
@@ -348,6 +416,21 @@ impl ServerStore {
             )
             .optional()
             .context("failed to query user by email")
+    }
+
+    fn find_session(&self, access_token: &str) -> Result<Option<UserSession>> {
+        let token = access_token.trim();
+        if token.is_empty() {
+            anyhow::bail!("access token cannot be empty");
+        }
+        self.conn
+            .query_row(
+                "SELECT token, user_id, created_at, last_used_at FROM user_sessions WHERE token = ?1",
+                params![token],
+                row_to_user_session,
+            )
+            .optional()
+            .context("failed to query session by token")
     }
 }
 
@@ -364,6 +447,7 @@ pub fn app(state: AppState) -> Router {
             "/v1/account/register",
             axum::routing::post(account_register),
         )
+        .route("/v1/account/login", axum::routing::post(account_login))
         .route("/v1/sync/push", axum::routing::post(sync_push))
         .route("/v1/sync/pull", axum::routing::post(sync_pull))
         .with_state(state)
@@ -432,6 +516,32 @@ async fn account_register(
     }))
 }
 
+async fn account_login(
+    State(state): State<AppState>,
+    Json(request): Json<LoginRequest>,
+) -> Result<Json<LoginResponse>, (StatusCode, String)> {
+    let mut store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    let user = store
+        .find_user_by_email(&request.email)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .ok_or((StatusCode::UNAUTHORIZED, "invalid credentials".to_owned()))?;
+    verify_password(&request.password, &user.password_hash)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid credentials".to_owned()))?;
+    let session = store
+        .create_session(&user)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(LoginResponse {
+        user_id: user.id,
+        email: user.email,
+        access_token: session.token,
+    }))
+}
+
 async fn sync_push(
     State(state): State<AppState>,
     Json(request): Json<PushRequest>,
@@ -442,8 +552,11 @@ async fn sync_push(
             "store lock poisoned".to_owned(),
         )
     })?;
+    let user = store
+        .authenticate(&request.access_token)
+        .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     store
-        .push(request)
+        .push(user.id, request)
         .map(Json)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
@@ -458,8 +571,11 @@ async fn sync_pull(
             "store lock poisoned".to_owned(),
         )
     })?;
+    let user = store
+        .authenticate(&request.access_token)
+        .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     store
-        .pull(request)
+        .pull(user.id, request)
         .map(Json)
         .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))
 }
@@ -478,10 +594,10 @@ fn default_database_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".lemontodo-server.db"))
 }
 
-fn has_operation(conn: &Connection, operation_id: Uuid) -> Result<bool> {
+fn has_operation(conn: &Connection, user_id: Uuid, operation_id: Uuid) -> Result<bool> {
     conn.query_row(
-        "SELECT 1 FROM sync_objects WHERE operation_id = ?1",
-        params![operation_id.to_string()],
+        "SELECT 1 FROM sync_objects WHERE user_id = ?1 AND operation_id = ?2",
+        params![user_id.to_string(), operation_id.to_string()],
         |_| Ok(()),
     )
     .optional()
@@ -489,13 +605,18 @@ fn has_operation(conn: &Connection, operation_id: Uuid) -> Result<bool> {
     .context("failed to check duplicate sync object")
 }
 
-fn insert_sync_object(conn: &Connection, object: &EncryptedSyncObject) -> Result<()> {
+fn insert_sync_object(
+    conn: &Connection,
+    user_id: Uuid,
+    object: &EncryptedSyncObject,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO sync_objects (
-            id, operation_id, device_id, object_id, object_revision,
+            user_id, id, operation_id, device_id, object_id, object_revision,
             object_type, operation_type, created_at, received_at, envelope
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
+            user_id.to_string(),
             object.id.to_string(),
             object.operation_id.to_string(),
             object.device_id.to_string(),
@@ -517,18 +638,18 @@ struct StoredSyncObject {
 }
 
 fn row_to_sync_object(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredSyncObject> {
-    let envelope = row.get::<_, String>(9)?;
+    let envelope = row.get::<_, String>(10)?;
     Ok(StoredSyncObject {
         server_seq: row.get(0)?,
         object: EncryptedSyncObject {
-            id: parse_uuid(row.get::<_, String>(1)?)?,
-            operation_id: parse_uuid(row.get::<_, String>(2)?)?,
-            device_id: parse_uuid(row.get::<_, String>(3)?)?,
-            object_id: parse_uuid(row.get::<_, String>(4)?)?,
-            object_revision: row.get(5)?,
-            object_type: row.get(6)?,
-            operation_type: row.get(7)?,
-            created_at: parse_datetime(row.get::<_, String>(8)?)?,
+            id: parse_uuid(row.get::<_, String>(2)?)?,
+            operation_id: parse_uuid(row.get::<_, String>(3)?)?,
+            device_id: parse_uuid(row.get::<_, String>(4)?)?,
+            object_id: parse_uuid(row.get::<_, String>(5)?)?,
+            object_revision: row.get(6)?,
+            object_type: row.get(7)?,
+            operation_type: row.get(8)?,
+            created_at: parse_datetime(row.get::<_, String>(9)?)?,
             envelope: serde_json::from_str(&envelope).map_err(to_sql_error)?,
         },
     })
@@ -567,6 +688,33 @@ fn hash_password(password: &str) -> Result<String> {
         .map_err(|error| anyhow::anyhow!("failed to hash password: {error}"))
 }
 
+fn verify_password(password: &str, password_hash: &str) -> Result<()> {
+    let parsed = PasswordHash::new(password_hash)
+        .map_err(|error| anyhow::anyhow!("failed to parse password hash: {error}"))?;
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .map_err(|_| anyhow::anyhow!("invalid credentials"))
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|existing| existing == column) {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn parse_uuid(value: String) -> rusqlite::Result<Uuid> {
     Uuid::parse_str(&value).map_err(to_sql_error)
 }
@@ -591,12 +739,21 @@ fn row_to_user_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserAccount>
     })
 }
 
+fn row_to_user_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserSession> {
+    Ok(UserSession {
+        token: row.get(0)?,
+        user_id: parse_uuid(row.get::<_, String>(1)?)?,
+        created_at: parse_datetime(row.get::<_, String>(2)?)?,
+        last_used_at: parse_datetime(row.get::<_, String>(3)?)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use lemontodo_crypto::CryptoEnvelope;
-    use lemontodo_sync::{PROTOCOL_VERSION, RegisterRequest, ServerCapability};
+    use lemontodo_sync::{LoginRequest, PROTOCOL_VERSION, RegisterRequest, ServerCapability};
 
     use super::*;
 
@@ -743,19 +900,54 @@ mod tests {
         assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn login_handler_creates_session_with_valid_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(response) = account_login(
+            State(state),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.email, "user@example.com");
+        assert!(!response.access_token.is_empty());
+    }
+
     #[test]
     fn stores_pushed_sync_objects_and_rejects_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
+        let (user, _session) = create_test_user_and_session(&mut store);
         let object = test_sync_object();
 
         let response = store
-            .push(PushRequest {
-                protocol_version: PROTOCOL_VERSION,
-                device_id: object.device_id,
-                base_cursor: None,
-                objects: vec![object.clone()],
-            })
+            .push(
+                user.id,
+                PushRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: object.device_id,
+                    access_token: "unused".to_owned(),
+                    base_cursor: None,
+                    objects: vec![object.clone()],
+                },
+            )
             .unwrap();
 
         assert_eq!(response.accepted.len(), 1);
@@ -764,12 +956,16 @@ mod tests {
         assert_eq!(store.count_sync_objects().unwrap(), 1);
 
         let response = store
-            .push(PushRequest {
-                protocol_version: PROTOCOL_VERSION,
-                device_id: object.device_id,
-                base_cursor: Some(response.cursor),
-                objects: vec![object],
-            })
+            .push(
+                user.id,
+                PushRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: object.device_id,
+                    access_token: "unused".to_owned(),
+                    base_cursor: Some(response.cursor),
+                    objects: vec![object],
+                },
+            )
             .unwrap();
 
         assert!(response.accepted.is_empty());
@@ -783,15 +979,20 @@ mod tests {
     fn rejects_unsupported_push_protocol_without_storing() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
+        let (user, _session) = create_test_user_and_session(&mut store);
         let object = test_sync_object();
 
         let response = store
-            .push(PushRequest {
-                protocol_version: PROTOCOL_VERSION + 1,
-                device_id: object.device_id,
-                base_cursor: None,
-                objects: vec![object],
-            })
+            .push(
+                user.id,
+                PushRequest {
+                    protocol_version: PROTOCOL_VERSION + 1,
+                    device_id: object.device_id,
+                    access_token: "unused".to_owned(),
+                    base_cursor: None,
+                    objects: vec![object],
+                },
+            )
             .unwrap();
 
         assert!(response.accepted.is_empty());
@@ -808,25 +1009,34 @@ mod tests {
     fn pulls_sync_objects_after_cursor_with_limit() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
+        let (user, _session) = create_test_user_and_session(&mut store);
         let first = test_sync_object();
         let second = test_sync_object();
 
         store
-            .push(PushRequest {
-                protocol_version: PROTOCOL_VERSION,
-                device_id: first.device_id,
-                base_cursor: None,
-                objects: vec![first.clone(), second.clone()],
-            })
+            .push(
+                user.id,
+                PushRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: first.device_id,
+                    access_token: "unused".to_owned(),
+                    base_cursor: None,
+                    objects: vec![first.clone(), second.clone()],
+                },
+            )
             .unwrap();
 
         let response = store
-            .pull(PullRequest {
-                protocol_version: PROTOCOL_VERSION,
-                device_id: Uuid::new_v4(),
-                cursor: None,
-                limit: 1,
-            })
+            .pull(
+                user.id,
+                PullRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: Uuid::new_v4(),
+                    access_token: "unused".to_owned(),
+                    cursor: None,
+                    limit: 1,
+                },
+            )
             .unwrap();
 
         assert_eq!(response.objects.len(), 1);
@@ -835,12 +1045,16 @@ mod tests {
         assert!(response.has_more);
 
         let response = store
-            .pull(PullRequest {
-                protocol_version: PROTOCOL_VERSION,
-                device_id: Uuid::new_v4(),
-                cursor: Some(response.cursor),
-                limit: 10,
-            })
+            .pull(
+                user.id,
+                PullRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: Uuid::new_v4(),
+                    access_token: "unused".to_owned(),
+                    cursor: Some(response.cursor),
+                    limit: 10,
+                },
+            )
             .unwrap();
 
         assert_eq!(response.objects.len(), 1);
@@ -853,28 +1067,89 @@ mod tests {
     fn unsupported_pull_protocol_returns_empty_current_cursor() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
+        let (user, _session) = create_test_user_and_session(&mut store);
         let object = test_sync_object();
         store
-            .push(PushRequest {
-                protocol_version: PROTOCOL_VERSION,
-                device_id: object.device_id,
-                base_cursor: None,
-                objects: vec![object],
-            })
+            .push(
+                user.id,
+                PushRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: object.device_id,
+                    access_token: "unused".to_owned(),
+                    base_cursor: None,
+                    objects: vec![object],
+                },
+            )
             .unwrap();
 
         let response = store
-            .pull(PullRequest {
-                protocol_version: PROTOCOL_VERSION + 1,
-                device_id: Uuid::new_v4(),
-                cursor: None,
-                limit: 10,
-            })
+            .pull(
+                user.id,
+                PullRequest {
+                    protocol_version: PROTOCOL_VERSION + 1,
+                    device_id: Uuid::new_v4(),
+                    access_token: "unused".to_owned(),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
             .unwrap();
 
         assert!(response.objects.is_empty());
         assert_eq!(response.cursor, "1");
         assert!(!response.has_more);
+    }
+
+    #[test]
+    fn pull_only_returns_objects_for_authenticated_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
+        let (user_a, _session_a) = create_test_user_and_session(&mut store);
+        let (user_b, _session_b) =
+            create_test_user_and_session_with_email(&mut store, "other@example.com");
+        let first = test_sync_object();
+        let second = test_sync_object();
+
+        store
+            .push(
+                user_a.id,
+                PushRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: first.device_id,
+                    access_token: "unused".to_owned(),
+                    base_cursor: None,
+                    objects: vec![first.clone()],
+                },
+            )
+            .unwrap();
+        store
+            .push(
+                user_b.id,
+                PushRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: second.device_id,
+                    access_token: "unused".to_owned(),
+                    base_cursor: None,
+                    objects: vec![second.clone()],
+                },
+            )
+            .unwrap();
+
+        let response = store
+            .pull(
+                user_a.id,
+                PullRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: Uuid::new_v4(),
+                    access_token: "unused".to_owned(),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(response.objects.len(), 1);
+        assert_eq!(response.objects[0].operation_id, first.operation_id);
     }
 
     fn test_sync_object() -> EncryptedSyncObject {
@@ -905,5 +1180,18 @@ mod tests {
             admin_email: None,
             admin_password: None,
         }
+    }
+
+    fn create_test_user_and_session(store: &mut ServerStore) -> (UserAccount, UserSession) {
+        create_test_user_and_session_with_email(store, "user@example.com")
+    }
+
+    fn create_test_user_and_session_with_email(
+        store: &mut ServerStore,
+        email: &str,
+    ) -> (UserAccount, UserSession) {
+        let user = store.create_user(email, "dev-password", false).unwrap();
+        let session = store.create_session(&user).unwrap();
+        (user, session)
     }
 }
