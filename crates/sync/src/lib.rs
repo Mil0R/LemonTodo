@@ -21,6 +21,7 @@ pub struct EncryptedSyncObject {
     pub id: Uuid,
     pub operation_id: Uuid,
     pub object_id: Uuid,
+    pub object_revision: i64,
     pub object_type: String,
     pub operation_type: String,
     pub created_at: DateTime<Utc>,
@@ -54,6 +55,7 @@ fn pack_operation(vault_key: &VaultKey, operation: &Operation) -> Result<Encrypt
         id: Uuid::new_v4(),
         operation_id: operation.id,
         object_id: operation.object_id,
+        object_revision: operation.object_revision,
         object_type: operation.object_type.as_str().to_owned(),
         operation_type: operation.operation_type.as_str().to_owned(),
         created_at: Utc::now(),
@@ -72,8 +74,12 @@ fn pack_operation(vault_key: &VaultKey, operation: &Operation) -> Result<Encrypt
 
 fn aad_for_object(object: &EncryptedSyncObject) -> String {
     format!(
-        "lemontodo-sync:v1:{}:{}:{}:{}",
-        object.operation_id, object.object_id, object.object_type, object.operation_type
+        "lemontodo-sync:v1:{}:{}:{}:{}:{}",
+        object.operation_id,
+        object.object_id,
+        object.object_revision,
+        object.object_type,
+        object.operation_type
     )
 }
 
@@ -90,6 +96,7 @@ mod tests {
         let operation = Operation {
             id: Uuid::new_v4(),
             object_id: Uuid::new_v4(),
+            object_revision: 1,
             object_type: ObjectType::Task,
             operation_type: OperationType::Create,
             payload: json!({ "title": "test" }),
@@ -99,6 +106,7 @@ mod tests {
 
         let pack = pack_operations(&key, std::slice::from_ref(&operation)).unwrap();
         assert_eq!(pack.objects.len(), 1);
+        assert_eq!(pack.objects[0].object_revision, operation.object_revision);
         let unpacked = unpack_operation(&key, &pack.objects[0]).unwrap();
         assert_eq!(unpacked.id, operation.id);
         assert_eq!(unpacked.payload, operation.payload);

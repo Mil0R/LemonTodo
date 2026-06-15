@@ -54,6 +54,7 @@ impl TodoStore {
         let task = Task {
             id: Uuid::new_v4(),
             list_id,
+            revision: 1,
             title: title.to_owned(),
             note_markdown: new_task.note_markdown,
             status: TaskStatus::Open,
@@ -67,12 +68,13 @@ impl TodoStore {
 
         self.conn.execute(
             "INSERT INTO tasks (
-                id, list_id, title, note_markdown, status, tags, due_date,
+                id, list_id, revision, title, note_markdown, status, tags, due_date,
                 sort_key, created_at, updated_at, deleted_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 task.id.to_string(),
                 task.list_id.to_string(),
+                task.revision,
                 task.title,
                 task.note_markdown,
                 task.status.as_str(),
@@ -105,14 +107,16 @@ impl TodoStore {
         let project = List {
             id: Uuid::new_v4(),
             name,
+            revision: 1,
             created_at: now,
             updated_at: now,
         };
         self.conn.execute(
-            "INSERT INTO lists (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO lists (id, name, revision, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 project.id.to_string(),
                 project.name,
+                project.revision,
                 project.created_at.to_rfc3339(),
                 project.updated_at.to_rfc3339(),
             ],
@@ -160,17 +164,22 @@ impl TodoStore {
 
             let target_id = if let Some(existing_id) = existing_id {
                 tx.execute(
-                    "UPDATE lists SET updated_at = ?1 WHERE id = ?2",
-                    params![list.updated_at.to_rfc3339(), existing_id.to_string()],
+                    "UPDATE lists SET revision = max(revision, ?1), updated_at = ?2 WHERE id = ?3",
+                    params![
+                        list.revision,
+                        list.updated_at.to_rfc3339(),
+                        existing_id.to_string()
+                    ],
                 )?;
                 existing_id
             } else {
                 tx.execute(
-                    "INSERT INTO lists (id, name, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO lists (id, name, revision, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         list.id.to_string(),
                         list.name,
+                        list.revision,
                         list.created_at.to_rfc3339(),
                         list.updated_at.to_rfc3339(),
                     ],
@@ -187,11 +196,12 @@ impl TodoStore {
                 .unwrap_or(task.list_id);
             tx.execute(
                 "INSERT INTO tasks (
-                    id, list_id, title, note_markdown, status, tags, due_date,
+                    id, list_id, revision, title, note_markdown, status, tags, due_date,
                     sort_key, created_at, updated_at, deleted_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 ON CONFLICT(id) DO UPDATE SET
                     list_id = excluded.list_id,
+                    revision = excluded.revision,
                     title = excluded.title,
                     note_markdown = excluded.note_markdown,
                     status = excluded.status,
@@ -204,6 +214,7 @@ impl TodoStore {
                 params![
                     task.id.to_string(),
                     list_id.to_string(),
+                    task.revision,
                     task.title,
                     task.note_markdown,
                     task.status.as_str(),
@@ -230,7 +241,7 @@ impl TodoStore {
 
     pub fn pending_operations(&self) -> Result<Vec<Operation>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, object_id, object_type, operation_type, payload, created_at, synced_at
+            "SELECT id, object_id, object_revision, object_type, operation_type, payload, created_at, synced_at
              FROM operations
              WHERE synced_at IS NULL
              ORDER BY created_at ASC",
@@ -304,9 +315,9 @@ impl TodoStore {
     }
 
     fn list_lists(&self) -> Result<Vec<List>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, name, created_at, updated_at FROM lists ORDER BY name ASC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, revision, created_at, updated_at FROM lists ORDER BY name ASC",
+        )?;
         let rows = stmt.query_map([], row_to_list)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to list lists")
@@ -356,13 +367,20 @@ impl TodoStore {
     pub fn move_task_to_project_by_id(&self, id: Uuid, list_id: Uuid) -> Result<Task> {
         let task = self.find_task_by_id(id)?;
         let now = Utc::now();
+        let revision = task.revision + 1;
         self.conn.execute(
-            "UPDATE tasks SET list_id = ?1, updated_at = ?2 WHERE id = ?3",
-            params![list_id.to_string(), now.to_rfc3339(), task.id.to_string()],
+            "UPDATE tasks SET list_id = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
+            params![
+                list_id.to_string(),
+                revision,
+                now.to_rfc3339(),
+                task.id.to_string()
+            ],
         )?;
 
         let updated = Task {
             list_id,
+            revision,
             updated_at: now,
             ..task
         };
@@ -413,13 +431,15 @@ impl TodoStore {
 
         let task = self.find_task_by_id(id)?;
         let now = Utc::now();
+        let revision = task.revision + 1;
         self.conn.execute(
-            "UPDATE tasks SET title = ?1, updated_at = ?2 WHERE id = ?3",
-            params![title, now.to_rfc3339(), task.id.to_string()],
+            "UPDATE tasks SET title = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
+            params![title, revision, now.to_rfc3339(), task.id.to_string()],
         )?;
 
         let updated = Task {
             title: title.to_owned(),
+            revision,
             updated_at: now,
             ..task
         };
@@ -441,13 +461,20 @@ impl TodoStore {
     pub fn update_task_note_by_id(&self, id: Uuid, note_markdown: &str) -> Result<Task> {
         let task = self.find_task_by_id(id)?;
         let now = Utc::now();
+        let revision = task.revision + 1;
         self.conn.execute(
-            "UPDATE tasks SET note_markdown = ?1, updated_at = ?2 WHERE id = ?3",
-            params![note_markdown, now.to_rfc3339(), task.id.to_string()],
+            "UPDATE tasks SET note_markdown = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
+            params![
+                note_markdown,
+                revision,
+                now.to_rfc3339(),
+                task.id.to_string()
+            ],
         )?;
 
         let updated = Task {
             note_markdown: note_markdown.to_owned(),
+            revision,
             updated_at: now,
             ..task
         };
@@ -477,10 +504,12 @@ impl TodoStore {
     ) -> Result<Task> {
         let task = self.find_task_by_id(id)?;
         let now = Utc::now();
+        let revision = task.revision + 1;
         self.conn.execute(
-            "UPDATE tasks SET due_date = ?1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE tasks SET due_date = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
             params![
                 due_date.map(|date| date.to_string()),
+                revision,
                 now.to_rfc3339(),
                 task.id.to_string()
             ],
@@ -488,6 +517,7 @@ impl TodoStore {
 
         let updated = Task {
             due_date,
+            revision,
             updated_at: now,
             ..task
         };
@@ -510,10 +540,12 @@ impl TodoStore {
         let task = self.find_task_by_id(id)?;
         let tags = normalize_tags(tags);
         let now = Utc::now();
+        let revision = task.revision + 1;
         self.conn.execute(
-            "UPDATE tasks SET tags = ?1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE tasks SET tags = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
             params![
                 serde_json::to_string(&tags)?,
+                revision,
                 now.to_rfc3339(),
                 task.id.to_string()
             ],
@@ -521,6 +553,7 @@ impl TodoStore {
 
         let updated = Task {
             tags,
+            revision,
             updated_at: now,
             ..task
         };
@@ -536,13 +569,20 @@ impl TodoStore {
 
     fn set_task_status(&self, task: Task, status: TaskStatus) -> Result<Task> {
         let now = Utc::now();
+        let revision = task.revision + 1;
         self.conn.execute(
-            "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
-            params![status.as_str(), now.to_rfc3339(), task.id.to_string()],
+            "UPDATE tasks SET status = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
+            params![
+                status.as_str(),
+                revision,
+                now.to_rfc3339(),
+                task.id.to_string()
+            ],
         )?;
 
         let updated = Task {
             status,
+            revision,
             updated_at: now,
             ..task
         };
@@ -571,6 +611,7 @@ impl TodoStore {
         let operation = Operation {
             id: Uuid::new_v4(),
             object_id,
+            object_revision: payload_revision(&payload).unwrap_or(1),
             object_type,
             operation_type,
             payload,
@@ -580,11 +621,12 @@ impl TodoStore {
 
         self.conn.execute(
             "INSERT INTO operations (
-                id, object_id, object_type, operation_type, payload, created_at, synced_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                id, object_id, object_revision, object_type, operation_type, payload, created_at, synced_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 operation.id.to_string(),
                 operation.object_id.to_string(),
+                operation.object_revision,
                 operation.object_type.as_str(),
                 operation.operation_type.as_str(),
                 serde_json::to_string(&operation.payload)?,
@@ -627,6 +669,7 @@ impl TodoStore {
             CREATE TABLE IF NOT EXISTS lists (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
+                revision INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -634,6 +677,7 @@ impl TodoStore {
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 list_id TEXT NOT NULL REFERENCES lists(id),
+                revision INTEGER NOT NULL DEFAULT 1,
                 title TEXT NOT NULL,
                 note_markdown TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL CHECK(status IN ('open', 'done', 'archived')),
@@ -651,6 +695,7 @@ impl TodoStore {
             CREATE TABLE IF NOT EXISTS operations (
                 id TEXT PRIMARY KEY,
                 object_id TEXT NOT NULL,
+                object_revision INTEGER NOT NULL DEFAULT 1,
                 object_type TEXT NOT NULL,
                 operation_type TEXT NOT NULL,
                 payload TEXT NOT NULL,
@@ -668,6 +713,24 @@ impl TodoStore {
             );
             ",
         )?;
+        add_column_if_missing(
+            &self.conn,
+            "lists",
+            "revision",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        add_column_if_missing(
+            &self.conn,
+            "tasks",
+            "revision",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        add_column_if_missing(
+            &self.conn,
+            "operations",
+            "object_revision",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
         Ok(())
     }
 
@@ -679,10 +742,11 @@ impl TodoStore {
         let list = List::inbox();
 
         self.conn.execute(
-            "INSERT INTO lists (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO lists (id, name, revision, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 list.id.to_string(),
                 list.name,
+                list.revision,
                 list.created_at.to_rfc3339(),
                 list.updated_at.to_rfc3339(),
             ],
@@ -706,7 +770,7 @@ impl TodoStore {
     fn find_list_by_name(&self, name: &str) -> Result<Option<List>> {
         self.conn
             .query_row(
-                "SELECT id, name, created_at, updated_at FROM lists WHERE name = ?1",
+                "SELECT id, name, revision, created_at, updated_at FROM lists WHERE name = ?1",
                 params![name],
                 row_to_list,
             )
@@ -760,20 +824,22 @@ fn row_to_list(row: &rusqlite::Row<'_>) -> rusqlite::Result<List> {
     Ok(List {
         id: parse_uuid(row.get::<_, String>(0)?)?,
         name: row.get(1)?,
-        created_at: parse_datetime(row.get::<_, String>(2)?)?,
-        updated_at: parse_datetime(row.get::<_, String>(3)?)?,
+        revision: row.get(2)?,
+        created_at: parse_datetime(row.get::<_, String>(3)?)?,
+        updated_at: parse_datetime(row.get::<_, String>(4)?)?,
     })
 }
 
 fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
-    let object_type = row.get::<_, String>(2)?;
-    let operation_type = row.get::<_, String>(3)?;
-    let payload = row.get::<_, String>(4)?;
-    let synced_at = row.get::<_, Option<String>>(6)?;
+    let object_type = row.get::<_, String>(3)?;
+    let operation_type = row.get::<_, String>(4)?;
+    let payload = row.get::<_, String>(5)?;
+    let synced_at = row.get::<_, Option<String>>(7)?;
 
     Ok(Operation {
         id: parse_uuid(row.get::<_, String>(0)?)?,
         object_id: parse_uuid(row.get::<_, String>(1)?)?,
+        object_revision: row.get(2)?,
         object_type: ObjectType::try_from(object_type.as_str()).map_err(|error| {
             to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })?,
@@ -781,33 +847,34 @@ fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
             to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })?,
         payload: serde_json::from_str(&payload).map_err(to_sql_error)?,
-        created_at: parse_datetime(row.get::<_, String>(5)?)?,
+        created_at: parse_datetime(row.get::<_, String>(6)?)?,
         synced_at: synced_at.map(parse_datetime).transpose()?,
     })
 }
 
 fn select_task_sql() -> &'static str {
-    "SELECT id, list_id, title, note_markdown, status, tags, due_date,
+    "SELECT id, list_id, revision, title, note_markdown, status, tags, due_date,
             sort_key, created_at, updated_at, deleted_at
      FROM tasks"
 }
 
 fn select_task_columns() -> &'static str {
-    "SELECT id, list_id, title, note_markdown, status, tags, due_date,
+    "SELECT id, list_id, revision, title, note_markdown, status, tags, due_date,
             sort_key, created_at, updated_at, deleted_at"
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
-    let status = row.get::<_, String>(4)?;
-    let tags = row.get::<_, String>(5)?;
-    let due_date = row.get::<_, Option<String>>(6)?;
-    let deleted_at = row.get::<_, Option<String>>(10)?;
+    let status = row.get::<_, String>(5)?;
+    let tags = row.get::<_, String>(6)?;
+    let due_date = row.get::<_, Option<String>>(7)?;
+    let deleted_at = row.get::<_, Option<String>>(11)?;
 
     Ok(Task {
         id: parse_uuid(row.get::<_, String>(0)?)?,
         list_id: parse_uuid(row.get::<_, String>(1)?)?,
-        title: row.get(2)?,
-        note_markdown: row.get(3)?,
+        revision: row.get(2)?,
+        title: row.get(3)?,
+        note_markdown: row.get(4)?,
         status: TaskStatus::try_from(status.as_str()).map_err(|error| {
             to_sql_error(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })?,
@@ -815,11 +882,38 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         due_date: due_date
             .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(to_sql_error))
             .transpose()?,
-        sort_key: row.get(7)?,
-        created_at: parse_datetime(row.get::<_, String>(8)?)?,
-        updated_at: parse_datetime(row.get::<_, String>(9)?)?,
+        sort_key: row.get(8)?,
+        created_at: parse_datetime(row.get::<_, String>(9)?)?,
+        updated_at: parse_datetime(row.get::<_, String>(10)?)?,
         deleted_at: deleted_at.map(parse_datetime).transpose()?,
     })
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|existing| existing == column) {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn payload_revision(payload: &serde_json::Value) -> Option<i64> {
+    payload
+        .get("task")
+        .or_else(|| payload.get("list"))
+        .and_then(|object| object.get("revision"))
+        .and_then(serde_json::Value::as_i64)
 }
 
 fn normalize_tags(tags: Vec<String>) -> Vec<String> {
@@ -866,7 +960,9 @@ mod tests {
 
         let task = store.add_task(NewTask::new("Ship MVP")).unwrap();
         assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.revision, 1);
         assert_eq!(store.pending_operations().unwrap().len(), 1);
+        assert_eq!(store.pending_operations().unwrap()[0].object_revision, 1);
 
         let open_tasks = store.list_tasks(false).unwrap();
         assert_eq!(open_tasks.len(), 1);
@@ -874,18 +970,21 @@ mod tests {
 
         let done = store.mark_done(&task.id.to_string()[..8]).unwrap();
         assert_eq!(done.status, TaskStatus::Done);
+        assert_eq!(done.revision, 2);
 
         assert!(store.list_tasks(false).unwrap().is_empty());
         assert_eq!(store.list_tasks(true).unwrap().len(), 1);
 
         let reopened = store.toggle_done(task.id).unwrap();
         assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(reopened.revision, 3);
         assert_eq!(store.list_tasks(false).unwrap().len(), 1);
 
         let edited = store
             .update_task_title_by_id(task.id, "Ship edited MVP")
             .unwrap();
         assert_eq!(edited.title, "Ship edited MVP");
+        assert_eq!(edited.revision, 4);
         assert_eq!(store.search_tasks("edited").unwrap().len(), 1);
 
         let noted = store
@@ -913,6 +1012,10 @@ mod tests {
         let operations = store.pending_operations().unwrap();
         assert!(operations.len() >= 7);
         assert_eq!(operations[0].operation_type, OperationType::Create);
+        assert_eq!(
+            operations.last().unwrap().object_revision,
+            archived.revision
+        );
         assert!(
             operations
                 .iter()

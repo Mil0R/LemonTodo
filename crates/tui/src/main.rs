@@ -271,10 +271,11 @@ fn main() -> Result<()> {
             } else {
                 for operation in operations {
                     println!(
-                        "{} {} {} {}",
+                        "{} {} {} rev:{} {}",
                         short_id(&operation.id.to_string()),
                         operation.object_type.as_str(),
                         operation.operation_type.as_str(),
+                        operation.object_revision,
                         operation.object_id
                     );
                 }

@@ -37,6 +37,7 @@ impl TryFrom<&str> for TaskStatus {
 pub struct List {
     pub id: Uuid,
     pub name: String,
+    pub revision: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -47,6 +48,7 @@ impl List {
         Self {
             id: Uuid::new_v4(),
             name: "Inbox".to_owned(),
+            revision: 1,
             created_at: now,
             updated_at: now,
         }
@@ -57,6 +59,7 @@ impl List {
 pub struct Task {
     pub id: Uuid,
     pub list_id: Uuid,
+    pub revision: i64,
     pub title: String,
     pub note_markdown: String,
     pub status: TaskStatus,
@@ -80,6 +83,7 @@ pub struct TodoSnapshot {
 pub struct Operation {
     pub id: Uuid,
     pub object_id: Uuid,
+    pub object_revision: i64,
     pub object_type: ObjectType,
     pub operation_type: OperationType,
     pub payload: serde_json::Value,

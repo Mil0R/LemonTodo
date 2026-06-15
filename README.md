@@ -199,6 +199,7 @@ Snapshots are plaintext local interchange files. They are not the final encrypte
 ## Local Sync Dry Run
 
 The current `dev` branch can initialize local encrypted vault metadata and pack pending local operations into encrypted sync objects without contacting a server.
+Tasks and projects carry a local monotonically increasing `revision`. Each pending operation records the target object revision so the future server can store opaque encrypted objects while clients reason about ordering and conflicts.
 
 Initialize local vault metadata:
 
@@ -229,10 +230,11 @@ ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
 This is a local E2EE dry-run for the future sync protocol. It does not implement account login, upload, pull, or conflict resolution yet.
+Use `ltd ops` to inspect pending local operations and their object revisions.
 
 ## Current Limitations
 
 - No remote sync yet.
 - No server yet.
 - OS keyring support is not implemented yet.
-- `ltd ops` only inspects the local pending operation log for future sync work.
+- `ltd ops` only inspects the local pending operation log for future sync work; it does not mark operations as synced.
