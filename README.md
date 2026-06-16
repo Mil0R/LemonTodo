@@ -91,6 +91,7 @@ LEMONTODO_SERVER_HOST=127.0.0.1
 LEMONTODO_SERVER_PORT=8787
 LEMONTODO_SERVER_DB=<platform-data-dir>/lemontodo-server/server.db
 LEMONTODO_ALLOW_REGISTRATION=false
+LEMONTODO_SESSION_TTL_SECS=2592000
 LEMONTODO_ADMIN_EMAIL=
 LEMONTODO_ADMIN_PASSWORD=
 ```
@@ -344,7 +345,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, inspect the current authenticated account/session, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement session expiry management or full conflict resolution yet.
+This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, inspect the current authenticated account/session, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, enforce server-configured session TTL expiry, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement full conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 
@@ -356,6 +357,6 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 ## Current Limitations
 
 - Remote push exists; remote pull stores pending remote operations, and apply handles safe remote creates plus safe task updates/archives.
-- Server has `/healthz`, `/v1/server-info`, `/v1/account/register`, `/v1/account/login`, `/v1/account/logout`, `/v1/account/me`, `/v1/account/vault-key`, and token-authenticated `/v1/sync/push` and `/v1/sync/pull`; richer device/session management is not implemented yet.
+- Server has `/healthz`, `/v1/server-info`, `/v1/account/register`, `/v1/account/login`, `/v1/account/logout`, `/v1/account/me`, `/v1/account/vault-key`, and token-authenticated `/v1/sync/push` and `/v1/sync/pull`; session TTL expiry is configurable, but richer device/session management is not implemented yet.
 - OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log; `ltd sync ack` remains useful for manual dry-runs, while `ltd sync push` acknowledges accepted server uploads automatically.

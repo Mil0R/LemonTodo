@@ -11,7 +11,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use lemontodo_sync::{
     AcceptedSyncObject, AccountStatusResponse, EncryptedSyncObject, LoginRequest, LoginResponse,
     LogoutRequest, LogoutResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest,
@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
+const DEFAULT_SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -32,6 +33,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub database_path: PathBuf,
     pub allow_registration: bool,
+    pub session_ttl_secs: i64,
     pub admin_email: Option<String>,
     pub admin_password: Option<String>,
 }
@@ -58,6 +60,17 @@ impl ServerConfig {
             .map(|value| parse_bool(&value, "LEMONTODO_ALLOW_REGISTRATION"))
             .transpose()?
             .unwrap_or(false);
+        let session_ttl_secs = lookup("LEMONTODO_SESSION_TTL_SECS")
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .with_context(|| format!("invalid LEMONTODO_SESSION_TTL_SECS: {value}"))
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_SESSION_TTL_SECS);
+        if session_ttl_secs <= 0 {
+            anyhow::bail!("LEMONTODO_SESSION_TTL_SECS must be greater than 0");
+        }
         let admin_email = lookup("LEMONTODO_ADMIN_EMAIL")
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
@@ -68,6 +81,7 @@ impl ServerConfig {
             port,
             database_path,
             allow_registration,
+            session_ttl_secs,
             admin_email,
             admin_password,
         })
@@ -216,21 +230,32 @@ impl ServerStore {
         Ok(session)
     }
 
-    pub fn authenticate(&self, access_token: &str) -> Result<UserAccount> {
-        let session = self
-            .find_session(access_token)?
-            .with_context(|| "invalid access token".to_owned())?;
-        self.find_user_by_id(session.user_id)?
-            .with_context(|| format!("session user does not exist: {}", session.user_id))
+    pub fn authenticate(
+        &mut self,
+        access_token: &str,
+        session_ttl: Duration,
+    ) -> Result<UserAccount> {
+        let (user, _) = self.authenticate_with_session(access_token, session_ttl)?;
+        Ok(user)
     }
 
     pub fn authenticate_with_session(
         &mut self,
         access_token: &str,
+        session_ttl: Duration,
     ) -> Result<(UserAccount, UserSession)> {
         let mut session = self
             .find_session(access_token)?
             .with_context(|| "invalid access token".to_owned())?;
+        if session.last_used_at + session_ttl < Utc::now() {
+            self.conn
+                .execute(
+                    "DELETE FROM user_sessions WHERE token = ?1",
+                    params![session.token],
+                )
+                .context("failed to delete expired session")?;
+            anyhow::bail!("expired access token");
+        }
         session.last_used_at = Utc::now();
         self.conn
             .execute(
@@ -634,7 +659,7 @@ async fn account_me(
         )
     })?;
     let (user, session) = store
-        .authenticate_with_session(access_token)
+        .authenticate_with_session(access_token, session_ttl(&state.config))
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     Ok(Json(AccountStatusResponse {
         user_id: user.id,
@@ -662,7 +687,7 @@ async fn account_get_vault_key(
         )
     })?;
     let (user, _) = store
-        .authenticate_with_session(access_token)
+        .authenticate_with_session(access_token, session_ttl(&state.config))
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     let encrypted_vault_key = user
         .encrypted_vault_key_json
@@ -692,7 +717,7 @@ async fn account_put_vault_key(
         )
     })?;
     let (user, _) = store
-        .authenticate_with_session(&request.access_token)
+        .authenticate_with_session(&request.access_token, session_ttl(&state.config))
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     let json = serde_json::to_string(&request.encrypted_vault_key).map_err(|error| {
         (
@@ -720,7 +745,7 @@ async fn sync_push(
         )
     })?;
     let (user, _) = store
-        .authenticate_with_session(&request.access_token)
+        .authenticate_with_session(&request.access_token, session_ttl(&state.config))
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     store
         .push(user.id, request)
@@ -739,7 +764,7 @@ async fn sync_pull(
         )
     })?;
     let (user, _) = store
-        .authenticate_with_session(&request.access_token)
+        .authenticate_with_session(&request.access_token, session_ttl(&state.config))
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     store
         .pull(user.id, request)
@@ -759,6 +784,10 @@ fn default_database_path() -> PathBuf {
     dirs::data_dir()
         .map(|path| path.join("lemontodo-server").join("server.db"))
         .unwrap_or_else(|| PathBuf::from(".lemontodo-server.db"))
+}
+
+fn session_ttl(config: &ServerConfig) -> Duration {
+    Duration::seconds(config.session_ttl_secs)
 }
 
 fn has_operation(conn: &Connection, user_id: Uuid, operation_id: Uuid) -> Result<bool> {
@@ -918,7 +947,7 @@ fn row_to_user_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserSession>
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, thread, time::Duration};
+    use std::{collections::HashMap, thread, time::Duration as StdDuration};
 
     use lemontodo_crypto::{CryptoEnvelope, KdfParams, VaultKey, wrap_vault_key};
     use lemontodo_sync::{
@@ -935,6 +964,7 @@ mod tests {
         assert_eq!(config.port, DEFAULT_PORT);
         assert_eq!(config.database_path, default_database_path());
         assert!(!config.allow_registration);
+        assert_eq!(config.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
         assert_eq!(config.admin_email, None);
         assert_eq!(config.admin_password, None);
     }
@@ -946,6 +976,7 @@ mod tests {
             ("LEMONTODO_SERVER_PORT", "9000"),
             ("LEMONTODO_SERVER_DB", "/tmp/lemontodo-test.db"),
             ("LEMONTODO_ALLOW_REGISTRATION", "yes"),
+            ("LEMONTODO_SESSION_TTL_SECS", "3600"),
             ("LEMONTODO_ADMIN_EMAIL", "admin@example.com"),
             ("LEMONTODO_ADMIN_PASSWORD", "dev-password"),
         ]);
@@ -959,6 +990,7 @@ mod tests {
             PathBuf::from("/tmp/lemontodo-test.db")
         );
         assert!(config.allow_registration);
+        assert_eq!(config.session_ttl_secs, 3600);
         assert_eq!(config.admin_email, Some("admin@example.com".to_owned()));
         assert_eq!(config.admin_password, Some("dev-password".to_owned()));
     }
@@ -970,6 +1002,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("LEMONTODO_ALLOW_REGISTRATION"));
+    }
+
+    #[test]
+    fn rejects_invalid_session_ttl_config() {
+        let env = HashMap::from([("LEMONTODO_SESSION_TTL_SECS", "0")]);
+        let error = ServerConfig::from_lookup(|key| env.get(key).map(ToString::to_string))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("LEMONTODO_SESSION_TTL_SECS must be greater than 0"));
     }
 
     #[test]
@@ -1136,8 +1177,12 @@ mod tests {
         .unwrap();
 
         assert!(response.revoked);
-        let store = state.store.lock().unwrap();
-        assert!(store.authenticate(&login.access_token).is_err());
+        let mut store = state.store.lock().unwrap();
+        assert!(
+            store
+                .authenticate(&login.access_token, session_ttl(&state.config))
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1220,7 +1265,7 @@ mod tests {
             let store = state.store.lock().unwrap();
             store.find_session(&login.access_token).unwrap().unwrap()
         };
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(StdDuration::from_millis(10));
 
         let mut query = HashMap::new();
         query.insert("access_token".to_owned(), login.access_token.clone());
@@ -1239,6 +1284,56 @@ mod tests {
             store.find_session(&login.access_token).unwrap().unwrap()
         };
         assert_eq!(refreshed_session.last_used_at, status.session_last_used_at);
+    }
+
+    #[tokio::test]
+    async fn account_me_rejects_expired_session_and_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        config.session_ttl_secs = 1;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(login) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        {
+            let store = state.store.lock().unwrap();
+            let expired_at = (Utc::now() - chrono::Duration::seconds(5)).to_rfc3339();
+            store
+                .conn
+                .execute(
+                    "UPDATE user_sessions SET last_used_at = ?1 WHERE token = ?2",
+                    params![expired_at, login.access_token],
+                )
+                .unwrap();
+        }
+
+        let mut query = HashMap::new();
+        query.insert("access_token".to_owned(), login.access_token.clone());
+        let error = account_me(State(state.clone()), axum::extract::Query(query))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.1, "expired access token");
+
+        let store = state.store.lock().unwrap();
+        assert!(store.find_session(&login.access_token).unwrap().is_none());
     }
 
     #[test]
@@ -1488,6 +1583,7 @@ mod tests {
             port: DEFAULT_PORT,
             database_path,
             allow_registration: false,
+            session_ttl_secs: DEFAULT_SESSION_TTL_SECS,
             admin_email: None,
             admin_password: None,
         }
