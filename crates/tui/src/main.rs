@@ -166,6 +166,12 @@ enum SyncCommand {
         /// Overwrite existing local vault metadata.
         #[arg(long)]
         force: bool,
+        /// Pull encrypted remote operations immediately after a successful connection.
+        #[arg(long)]
+        pull: bool,
+        /// Maximum number of encrypted objects to fetch when using --pull.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
     },
     /// Revoke the current server session and clear the local access token.
     Logout {
@@ -463,6 +469,8 @@ fn main() -> Result<()> {
                 master_password,
                 server_url,
                 force,
+                pull,
+                limit,
             } => {
                 let email = email
                     .or(store.sync_account_email()?)
@@ -473,13 +481,33 @@ fn main() -> Result<()> {
                     .unwrap_or_else(|| prompt_master_password("Master password: "))?;
                 let connected = connect_device(
                     &store,
-                    server_url.as_deref(),
-                    &email,
-                    &password,
-                    &master_password,
-                    force,
+                    DeviceConnectOptions {
+                        server_url: server_url.as_deref(),
+                        email: &email,
+                        password: &password,
+                        master_password: &master_password,
+                        force,
+                        pull,
+                        limit,
+                    },
                 )?;
                 println!("Connected device for {}", connected.email);
+                if let Some(pulled) = connected.pulled {
+                    println!(
+                        "Pulled {} object(s), saved {}, cursor {}, has_more {}",
+                        pulled.fetched, pulled.saved, pulled.cursor, pulled.has_more
+                    );
+                    for operation in &pulled.operations {
+                        println!(
+                            "{} {} {} rev:{} {}",
+                            short_id(&operation.id.to_string()),
+                            operation.object_type.as_str(),
+                            operation.operation_type.as_str(),
+                            operation.object_revision,
+                            operation.object_id
+                        );
+                    }
+                }
             }
             SyncCommand::Logout {
                 local_only,
@@ -754,6 +782,25 @@ struct PullSummary {
 
 struct DeviceConnectSummary {
     email: String,
+    pulled: Option<ConnectPullSummary>,
+}
+
+struct DeviceConnectOptions<'a> {
+    server_url: Option<&'a str>,
+    email: &'a str,
+    password: &'a str,
+    master_password: &'a str,
+    force: bool,
+    pull: bool,
+    limit: u32,
+}
+
+struct ConnectPullSummary {
+    operations: Vec<lemontodo_core::Operation>,
+    fetched: usize,
+    saved: usize,
+    cursor: String,
+    has_more: bool,
 }
 
 fn push_pending_operations(
@@ -865,29 +912,52 @@ fn pull_vault_metadata(store: &TodoStore, force: bool) -> Result<bool> {
 
 fn connect_device(
     store: &TodoStore,
-    server_url: Option<&str>,
-    email: &str,
-    password: &str,
-    master_password: &str,
-    force: bool,
+    options: DeviceConnectOptions<'_>,
 ) -> Result<DeviceConnectSummary> {
-    let server_url = configured_server_url(store, server_url)?;
+    let server_url = configured_server_url(store, options.server_url)?;
     let login = post_login_request(
         &server_url,
         &LoginRequest {
-            email: email.to_owned(),
-            password: password.to_owned(),
+            email: options.email.to_owned(),
+            password: options.password.to_owned(),
         },
     )?;
     let response = get_vault_metadata_request(&server_url, &login.access_token)?;
     let encrypted_vault_key = response.encrypted_vault_key.context(
         "server account has no encrypted vault metadata; initialize another device and run ltd sync vault push first",
     )?;
-    import_remote_vault_metadata(store, &encrypted_vault_key, force, master_password)?;
+    import_remote_vault_metadata(
+        store,
+        &encrypted_vault_key,
+        options.force,
+        options.master_password,
+    )?;
     store.save_sync_server_url(&server_url)?;
     store.save_sync_account_email(&login.email)?;
     store.save_sync_access_token(&login.access_token)?;
-    Ok(DeviceConnectSummary { email: login.email })
+    let pulled = if options.pull {
+        let pulled = pull_remote_operations(
+            store,
+            None,
+            Some(options.master_password.to_owned()),
+            None,
+            options.limit,
+        )?;
+        let saved = store.save_remote_operations(&pulled.operations, &pulled.cursor)?;
+        Some(ConnectPullSummary {
+            fetched: pulled.operations.len(),
+            saved,
+            cursor: pulled.cursor.clone(),
+            has_more: pulled.has_more,
+            operations: pulled.operations,
+        })
+    } else {
+        None
+    };
+    Ok(DeviceConnectSummary {
+        email: login.email,
+        pulled,
+    })
 }
 
 fn register_account(

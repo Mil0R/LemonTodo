@@ -256,7 +256,8 @@ New device flow:
 MVP CLI mapping:
 
 1. `ltd sync connect --email <email>` performs steps 1-4 and refuses to save remote vault metadata unless the master password can unlock it locally.
-2. `ltd sync pull` then downloads encrypted sync objects for local apply.
+2. `ltd sync connect --email <email> --pull` can immediately download the first batch of encrypted sync objects into the local inbox.
+3. `ltd sync apply` remains an explicit follow-up step.
 
 Forgotten master password cannot be recovered by the server.
 
