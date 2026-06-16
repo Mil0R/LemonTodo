@@ -66,7 +66,7 @@ Run it directly:
 Run the server skeleton:
 
 ```bash
-LEMONTODO_SERVER_HOST=127.0.0.1 LEMONTODO_SERVER_PORT=8787 cargo run -p lemontodo-server
+LEMONTODO_SERVER_HOST=0.0.0.0 LEMONTODO_SERVER_PORT=8787 cargo run -p lemontodo-server
 ```
 
 Run the local end-to-end client/server test:
@@ -111,7 +111,7 @@ POST /v1/sync/pull
 Server environment variables:
 
 ```text
-LEMONTODO_SERVER_HOST=127.0.0.1
+LEMONTODO_SERVER_HOST=0.0.0.0
 LEMONTODO_SERVER_PORT=8787
 LEMONTODO_SERVER_DB=<platform-data-dir>/lemontodo-server/server.db
 LEMONTODO_ALLOW_REGISTRATION=false

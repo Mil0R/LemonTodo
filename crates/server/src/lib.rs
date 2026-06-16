@@ -31,7 +31,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use uuid::Uuid;
 
-const DEFAULT_HOST: &str = "127.0.0.1";
+const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 const DEFAULT_REGISTER_WASM_DIR: &str = "target/register-wasm";
