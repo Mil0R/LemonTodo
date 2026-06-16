@@ -183,6 +183,9 @@ enum SyncCommand {
         /// Only clear the local token without calling the server.
         #[arg(long)]
         local_only: bool,
+        /// Revoke every active server session for the current account.
+        #[arg(long)]
+        all: bool,
         /// Override the configured server URL for this logout.
         #[arg(long)]
         server_url: Option<String>,
@@ -552,25 +555,35 @@ fn main() -> Result<()> {
             }
             SyncCommand::Logout {
                 local_only,
+                all,
                 server_url,
             } => {
+                if local_only && all {
+                    bail!("use either --local-only or --all, not both");
+                }
                 let token = store
                     .sync_access_token()?
                     .context("sync access token is not configured; run ltd sync login")?;
-                let revoked = if local_only {
-                    false
+                if all {
+                    let revoked = logout_all_sessions(&store, server_url.as_deref())?;
+                    store.clear_sync_access_token()?;
+                    println!("Logged out and revoked {revoked} remote session(s)");
                 } else {
-                    logout_account(&store, server_url.as_deref(), &token)?.revoked
-                };
-                store.clear_sync_access_token()?;
-                println!(
-                    "Logged out{}",
-                    if revoked {
-                        " and revoked remote session"
+                    let revoked = if local_only {
+                        false
                     } else {
-                        ""
-                    }
-                );
+                        logout_account(&store, server_url.as_deref(), &token)?.revoked
+                    };
+                    store.clear_sync_access_token()?;
+                    println!(
+                        "Logged out{}",
+                        if revoked {
+                            " and revoked remote session"
+                        } else {
+                            ""
+                        }
+                    );
+                }
             }
             SyncCommand::Status => {
                 let pending = store.pending_operations()?.len();
@@ -1099,6 +1112,24 @@ fn logout_account(
             access_token: access_token.to_owned(),
         },
     )
+}
+
+fn logout_all_sessions(store: &TodoStore, server_url: Option<&str>) -> Result<usize> {
+    let sessions = fetch_sessions(store, server_url)?;
+    let mut revoked = 0;
+    for session in sessions.sessions.iter().filter(|session| !session.current) {
+        let response = revoke_session_by_prefix(store, server_url, &session.session_id)?;
+        if response.revoked {
+            revoked += 1;
+        }
+    }
+    for session in sessions.sessions.iter().filter(|session| session.current) {
+        let response = revoke_session_by_prefix(store, server_url, &session.session_id)?;
+        if response.revoked {
+            revoked += 1;
+        }
+    }
+    Ok(revoked)
 }
 
 fn fetch_account_status(

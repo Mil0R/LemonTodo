@@ -198,6 +198,7 @@ ltd sync sessions
 ltd sync revoke <session-id-prefix>
 ltd sync status
 ltd sync logout
+ltd sync logout --all
 ltd sync vault push
 ltd sync vault pull
 ltd move <task-id-prefix> LemonTodo
@@ -332,7 +333,7 @@ ltd sync pull --json
 `ltd sync whoami` calls the server with the stored access token and shows which account and session the server currently sees, including whether encrypted vault metadata exists remotely and which device metadata is attached to that session.
 `ltd sync sessions` lists active sessions/devices for the current account and marks the current session.
 `ltd sync revoke <session-id-prefix>` revokes one active session from `ltd sync sessions`. If it revokes the current session, the local token is cleared.
-`ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first.
+`ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first. `ltd sync logout --all` revokes every active server session for the current account and then clears the local token.
 `ltd sync vault push` uploads the local `EncryptedVaultKey` to the current server account. `ltd sync vault pull` downloads it for a new device and refuses to overwrite local metadata unless `--force` is passed.
 `ltd sync connect` is the recommended new-device onboarding command: it logs into the server account, downloads encrypted vault metadata, verifies that the provided master password can unlock it locally, and only then saves the local token and metadata. With `--pull`, it immediately downloads the first batch of encrypted remote operations into the local inbox. With `--pull --apply-safe`, it also runs the same safe automatic apply path as `ltd sync apply`, leaving skipped and conflicting items in the inbox.
 When the server rejects the stored token because it is invalid or expired, sync commands now return a direct hint to run `ltd sync login` again.
