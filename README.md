@@ -142,6 +142,7 @@ cargo run -p lemontodo-tui -- sync register --email you@example.com
 cargo run -p lemontodo-tui -- sync login --email you@example.com
 cargo run -p lemontodo-tui -- sync connect --email you@example.com
 cargo run -p lemontodo-tui -- sync connect --email you@example.com --pull
+cargo run -p lemontodo-tui -- sync connect --email you@example.com --pull --apply-safe
 cargo run -p lemontodo-tui -- sync logout
 cargo run -p lemontodo-tui -- sync vault push
 cargo run -p lemontodo-tui -- sync vault pull
@@ -186,6 +187,7 @@ ltd sync register --email you@example.com
 ltd sync login --email you@example.com
 ltd sync connect --email you@example.com
 ltd sync connect --email you@example.com --pull
+ltd sync connect --email you@example.com --pull --apply-safe
 ltd sync status
 ltd sync logout
 ltd sync vault push
@@ -295,6 +297,13 @@ ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
 ltd sync connect --email you@example.com --pull
 ```
 
+Connect a new device, pull the first batch, and immediately apply only safe remote operations:
+
+```bash
+ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
+ltd sync connect --email you@example.com --pull --apply-safe
+```
+
 Pull and decrypt remote operations without applying them locally:
 
 ```bash
@@ -314,7 +323,7 @@ ltd sync pull --json
 `ltd sync status` shows the configured server account email, whether an access token is stored locally, and whether local vault metadata exists.
 `ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first.
 `ltd sync vault push` uploads the local `EncryptedVaultKey` to the current server account. `ltd sync vault pull` downloads it for a new device and refuses to overwrite local metadata unless `--force` is passed.
-`ltd sync connect` is the recommended new-device onboarding command: it logs into the server account, downloads encrypted vault metadata, verifies that the provided master password can unlock it locally, and only then saves the local token and metadata. With `--pull`, it immediately downloads the first batch of encrypted remote operations into the local inbox.
+`ltd sync connect` is the recommended new-device onboarding command: it logs into the server account, downloads encrypted vault metadata, verifies that the provided master password can unlock it locally, and only then saves the local token and metadata. With `--pull`, it immediately downloads the first batch of encrypted remote operations into the local inbox. With `--pull --apply-safe`, it also runs the same safe automatic apply path as `ltd sync apply`, leaving skipped and conflicting items in the inbox.
 These commands prompt for the master password without echoing it to the terminal. Registration and login also prompt for the account password without echoing it. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:

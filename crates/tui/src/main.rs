@@ -172,6 +172,9 @@ enum SyncCommand {
         /// Maximum number of encrypted objects to fetch when using --pull.
         #[arg(long, default_value_t = 100)]
         limit: u32,
+        /// Apply safe pulled remote operations immediately after saving them to the local inbox.
+        #[arg(long)]
+        apply_safe: bool,
     },
     /// Revoke the current server session and clear the local access token.
     Logout {
@@ -471,7 +474,11 @@ fn main() -> Result<()> {
                 force,
                 pull,
                 limit,
+                apply_safe,
             } => {
+                if apply_safe && !pull {
+                    anyhow::bail!("--apply-safe requires --pull");
+                }
                 let email = email
                     .or(store.sync_account_email()?)
                     .context("sync account email is not configured; pass --email or run ltd sync configure --email <email>")?;
@@ -489,6 +496,7 @@ fn main() -> Result<()> {
                         force,
                         pull,
                         limit,
+                        apply_safe,
                     },
                 )?;
                 println!("Connected device for {}", connected.email);
@@ -505,6 +513,12 @@ fn main() -> Result<()> {
                             operation.operation_type.as_str(),
                             operation.object_revision,
                             operation.object_id
+                        );
+                    }
+                    if let Some(applied) = pulled.applied {
+                        println!(
+                            "Applied {}, skipped {}, conflicts {}",
+                            applied.applied, applied.skipped, applied.conflicts
                         );
                     }
                 }
@@ -793,6 +807,7 @@ struct DeviceConnectOptions<'a> {
     force: bool,
     pull: bool,
     limit: u32,
+    apply_safe: bool,
 }
 
 struct ConnectPullSummary {
@@ -801,6 +816,7 @@ struct ConnectPullSummary {
     saved: usize,
     cursor: String,
     has_more: bool,
+    applied: Option<lemontodo_storage::RemoteApplySummary>,
 }
 
 fn push_pending_operations(
@@ -944,12 +960,18 @@ fn connect_device(
             options.limit,
         )?;
         let saved = store.save_remote_operations(&pulled.operations, &pulled.cursor)?;
+        let applied = if options.apply_safe {
+            Some(store.apply_pending_remote_operations()?)
+        } else {
+            None
+        };
         Some(ConnectPullSummary {
             fetched: pulled.operations.len(),
             saved,
             cursor: pulled.cursor.clone(),
             has_more: pulled.has_more,
             operations: pulled.operations,
+            applied,
         })
     } else {
         None
