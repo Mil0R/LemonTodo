@@ -1,7 +1,7 @@
 mod app;
 mod ui;
 
-use std::{collections::HashMap, fs, io, path::PathBuf, time::Duration};
+use std::{collections::HashMap, fs, io, io::IsTerminal, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
@@ -12,7 +12,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use lemontodo_core::{NewTask, Task, TaskStatus};
-use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
+use lemontodo_crypto::{KdfParams, VaultKey, derive_auth_hash, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
     AccountStatusResponse, LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
@@ -27,6 +27,8 @@ use crate::{
     app::{App, Mode, parse_due_input},
     ui::draw,
 };
+
+const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8787";
 
 #[derive(Debug, Parser)]
 #[command(name = "ltd")]
@@ -131,12 +133,13 @@ enum SyncCommand {
         email: Option<String>,
     },
     /// Register a server account and save the account email locally.
+    #[command(hide = true)]
     Register {
         #[arg(long)]
         email: String,
-        /// Development/script compatibility. Prefer hidden prompt.
+        /// Development/script compatibility. Prefer server-side registration.
         #[arg(long)]
-        password: Option<String>,
+        master_password: Option<String>,
         /// Override the configured server URL for this registration.
         #[arg(long)]
         server_url: Option<String>,
@@ -147,7 +150,7 @@ enum SyncCommand {
         email: Option<String>,
         /// Development/script compatibility. Prefer hidden prompt.
         #[arg(long)]
-        password: Option<String>,
+        master_password: Option<String>,
         /// Override the configured server URL for this login.
         #[arg(long)]
         server_url: Option<String>,
@@ -156,9 +159,6 @@ enum SyncCommand {
     Connect {
         #[arg(long)]
         email: Option<String>,
-        /// Development/script compatibility. Prefer hidden prompt.
-        #[arg(long)]
-        password: Option<String>,
         /// Development/script compatibility. Prefer hidden prompt.
         #[arg(long)]
         master_password: Option<String>,
@@ -336,7 +336,9 @@ enum VaultCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let db_path = cli.db.unwrap_or_else(default_db_path);
+    let db_path = cli
+        .db
+        .unwrap_or_else(|| default_db_path_for_command(&cli.command));
     let store = TodoStore::open(&db_path)?;
 
     match cli.command {
@@ -489,33 +491,65 @@ fn main() -> Result<()> {
             }
             SyncCommand::Register {
                 email,
-                password,
+                master_password,
                 server_url,
             } => {
-                let password = password
+                let master_password = master_password
                     .map(Ok)
-                    .unwrap_or_else(prompt_new_account_password)?;
-                let response = register_account(&store, server_url.as_deref(), &email, &password)?;
+                    .unwrap_or_else(prompt_new_master_password)?;
+                let response =
+                    register_account(&store, server_url.as_deref(), &email, &master_password)?;
                 store.save_sync_account_email(&response.email)?;
                 println!("Registered account {}", response.email);
             }
             SyncCommand::Login {
                 email,
-                password,
+                master_password,
                 server_url,
             } => {
-                let email = email
-                    .or(store.sync_account_email()?)
-                    .context("sync account email is not configured; pass --email or run ltd sync configure --email <email>")?;
-                let password = password.map(Ok).unwrap_or_else(prompt_account_password)?;
-                let response = login_account(&store, server_url.as_deref(), &email, &password)?;
+                let server_url = match server_url {
+                    Some(server_url) => Some(server_url),
+                    None => {
+                        let default = store
+                            .sync_server_url()?
+                            .unwrap_or_else(|| DEFAULT_SERVER_URL.to_owned());
+                        if io::stdin().is_terminal() {
+                            let input = prompt_text(&format!("Server [{default}]: "))?;
+                            if input.is_empty() {
+                                Some(default)
+                            } else {
+                                Some(input)
+                            }
+                        } else {
+                            Some(default)
+                        }
+                    }
+                };
+                let email = match email.or(store.sync_account_email()?) {
+                    Some(email) => email,
+                    None => prompt_text("Account email: ")?,
+                };
+                if email.trim().is_empty() {
+                    anyhow::bail!("account email cannot be empty");
+                }
+                let master_password = master_password
+                    .map(Ok)
+                    .unwrap_or_else(|| prompt_master_password("Master password: "))?;
+                let response =
+                    login_account(&store, server_url.as_deref(), &email, &master_password)?;
+                let vault_metadata = fetch_vault_metadata_for_token(
+                    &store,
+                    server_url.as_deref(),
+                    &response.access_token,
+                )?;
+                verify_or_save_vault_metadata(&store, &vault_metadata, &master_password)?;
+                store.save_sync_server_url(server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL))?;
                 store.save_sync_account_email(&response.email)?;
                 store.save_sync_access_token(&response.access_token)?;
                 println!("Logged in as {}", response.email);
             }
             SyncCommand::Connect {
                 email,
-                password,
                 master_password,
                 server_url,
                 force,
@@ -529,7 +563,6 @@ fn main() -> Result<()> {
                 let email = email
                     .or(store.sync_account_email()?)
                     .context("sync account email is not configured; pass --email or run ltd sync configure --email <email>")?;
-                let password = password.map(Ok).unwrap_or_else(prompt_account_password)?;
                 let master_password = master_password
                     .map(Ok)
                     .unwrap_or_else(|| prompt_master_password("Master password: "))?;
@@ -538,7 +571,6 @@ fn main() -> Result<()> {
                     DeviceConnectOptions {
                         server_url: server_url.as_deref(),
                         email: &email,
-                        password: &password,
                         master_password: &master_password,
                         force,
                         pull,
@@ -941,7 +973,6 @@ struct DeviceConnectSummary {
 struct DeviceConnectOptions<'a> {
     server_url: Option<&'a str>,
     email: &'a str,
-    password: &'a str,
     master_password: &'a str,
     force: bool,
     pull: bool,
@@ -1109,6 +1140,34 @@ fn pull_vault_metadata(store: &TodoStore, force: bool) -> Result<bool> {
     Ok(true)
 }
 
+fn fetch_vault_metadata_for_token(
+    store: &TodoStore,
+    server_url: Option<&str>,
+    access_token: &str,
+) -> Result<lemontodo_crypto::EncryptedVaultKey> {
+    let server_url = configured_server_url(store, server_url)?;
+    let response = get_vault_metadata_request(&server_url, access_token)?;
+    response.encrypted_vault_key.context(
+        "server account has no encrypted vault metadata; register the account on the server first",
+    )
+}
+
+fn verify_or_save_vault_metadata(
+    store: &TodoStore,
+    remote: &lemontodo_crypto::EncryptedVaultKey,
+    master_password: &str,
+) -> Result<()> {
+    unwrap_vault_key(remote, master_password)
+        .context("master password could not unlock the server vault metadata")?;
+    if let Some(local) = store.encrypted_vault_key()? {
+        unwrap_vault_key(&local, master_password)
+            .context("master password could not unlock the existing local vault metadata")?;
+    } else {
+        store.save_encrypted_vault_key(remote)?;
+    }
+    Ok(())
+}
+
 fn connect_device(
     store: &TodoStore,
     options: DeviceConnectOptions<'_>,
@@ -1118,7 +1177,7 @@ fn connect_device(
         &server_url,
         &LoginRequest {
             email: options.email.to_owned(),
-            password: options.password.to_owned(),
+            auth_hash: derive_auth_hash(options.email, options.master_password)?,
             device_id: store.device_id()?,
             device_name: inferred_device_name(),
         },
@@ -1171,14 +1230,23 @@ fn register_account(
     store: &TodoStore,
     server_url: Option<&str>,
     email: &str,
-    password: &str,
+    master_password: &str,
 ) -> Result<RegisterResponse> {
     let server_url = configured_server_url(store, server_url)?;
+    let vault_key = VaultKey::generate();
+    let encrypted_vault_key = wrap_vault_key(
+        &vault_key,
+        master_password,
+        KdfParams::generate_interactive(),
+    )?;
+    unwrap_vault_key(&encrypted_vault_key, master_password)?;
+    store.save_encrypted_vault_key(&encrypted_vault_key)?;
     post_register_request(
         &server_url,
         &RegisterRequest {
             email: email.to_owned(),
-            password: password.to_owned(),
+            auth_hash: derive_auth_hash(email, master_password)?,
+            encrypted_vault_key,
         },
     )
 }
@@ -1187,14 +1255,14 @@ fn login_account(
     store: &TodoStore,
     server_url: Option<&str>,
     email: &str,
-    password: &str,
+    master_password: &str,
 ) -> Result<LoginResponse> {
     let server_url = configured_server_url(store, server_url)?;
     post_login_request(
         &server_url,
         &LoginRequest {
             email: email.to_owned(),
-            password: password.to_owned(),
+            auth_hash: derive_auth_hash(email, master_password)?,
             device_id: store.device_id()?,
             device_name: inferred_device_name(),
         },
@@ -1527,7 +1595,8 @@ fn configured_server_url(store: &TodoStore, override_url: Option<&str>) -> Resul
     override_url
         .map(|value| value.trim().trim_end_matches('/').to_owned())
         .or(store.sync_server_url()?)
-        .context("sync server is not configured; run ltd sync configure --server-url <url>")
+        .or_else(|| Some(DEFAULT_SERVER_URL.to_owned()))
+        .context("sync server is not configured")
 }
 
 fn configured_access_token(store: &TodoStore) -> Result<String> {
@@ -1594,31 +1663,20 @@ fn prompt_new_master_password() -> Result<String> {
     Ok(password)
 }
 
-fn prompt_new_account_password() -> Result<String> {
-    let password = rpassword::prompt_password("Account password: ")
-        .context("failed to read account password")?;
-    if password.is_empty() {
-        anyhow::bail!("account password cannot be empty");
-    }
-    let confirmation = rpassword::prompt_password("Confirm account password: ")
-        .context("failed to read account password confirmation")?;
-    if password != confirmation {
-        anyhow::bail!("account passwords did not match");
-    }
-    Ok(password)
-}
-
-fn prompt_account_password() -> Result<String> {
-    let password = rpassword::prompt_password("Account password: ")
-        .context("failed to read account password")?;
-    if password.is_empty() {
-        anyhow::bail!("account password cannot be empty");
-    }
-    Ok(password)
-}
-
 fn prompt_master_password(prompt: &str) -> Result<String> {
     rpassword::prompt_password(prompt).context("failed to read master password")
+}
+
+fn prompt_text(prompt: &str) -> Result<String> {
+    use std::io::Write;
+
+    print!("{prompt}");
+    io::stdout().flush().context("failed to flush stdout")?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("failed to read input")?;
+    Ok(input.trim().to_owned())
 }
 
 #[cfg(test)]
@@ -1942,6 +2000,61 @@ fn default_db_path() -> PathBuf {
         .context("failed to locate user data directory")
         .map(|path| path.join("lemontodo").join("lemontodo.db"))
         .unwrap_or_else(|_| PathBuf::from(".lemontodo.db"))
+}
+
+fn default_db_path_for_command(command: &Option<Command>) -> PathBuf {
+    if let Some(Command::Sync {
+        command:
+            SyncCommand::Login {
+                email: Some(email),
+                server_url,
+                ..
+            }
+            | SyncCommand::Connect {
+                email: Some(email),
+                server_url,
+                ..
+            },
+    }) = command
+    {
+        let server_url = server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL);
+        return account_db_path(server_url, email);
+    }
+    default_db_path()
+}
+
+fn account_db_path(server_url: &str, email: &str) -> PathBuf {
+    dirs::data_dir()
+        .context("failed to locate user data directory")
+        .map(|path| {
+            path.join("lemontodo")
+                .join("accounts")
+                .join(safe_path_component(server_url))
+                .join(safe_path_component(email))
+                .join("lemontodo.db")
+        })
+        .unwrap_or_else(|_| {
+            PathBuf::from(".lemontodo")
+                .join("accounts")
+                .join(safe_path_component(server_url))
+                .join(safe_path_component(email))
+                .join("lemontodo.db")
+        })
+}
+
+fn safe_path_component(value: &str) -> String {
+    let mut output = String::new();
+    for byte in value.trim().to_ascii_lowercase().bytes() {
+        match byte {
+            b'a'..=b'z' | b'0'..=b'9' => output.push(byte as char),
+            _ => output.push_str(&format!("_{byte:02x}")),
+        }
+    }
+    if output.is_empty() {
+        "unknown".to_owned()
+    } else {
+        output
+    }
 }
 
 fn short_id(id: &str) -> &str {

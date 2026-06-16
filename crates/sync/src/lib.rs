@@ -150,7 +150,8 @@ pub struct PullResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterRequest {
     pub email: String,
-    pub password: String,
+    pub auth_hash: String,
+    pub encrypted_vault_key: EncryptedVaultKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,7 +164,7 @@ pub struct RegisterResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginRequest {
     pub email: String,
-    pub password: String,
+    pub auth_hash: String,
     pub device_id: Uuid,
     pub device_name: String,
 }
@@ -400,11 +401,12 @@ mod tests {
 
         let login = LoginRequest {
             email: "user@example.com".to_owned(),
-            password: "dev-password".to_owned(),
+            auth_hash: "auth-hash".to_owned(),
             device_id: Uuid::nil(),
             device_name: "workstation".to_owned(),
         };
         let json = serde_json::to_value(&login).unwrap();
+        assert_eq!(json["auth_hash"], "auth-hash");
         assert_eq!(json["device_id"], Uuid::nil().to_string());
         assert_eq!(json["device_name"], "workstation");
 

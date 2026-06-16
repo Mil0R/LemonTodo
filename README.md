@@ -150,7 +150,6 @@ cargo run -p lemontodo-tui -- export ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- import ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- ops
 cargo run -p lemontodo-tui -- sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-cargo run -p lemontodo-tui -- sync register --email you@example.com
 cargo run -p lemontodo-tui -- sync login --email you@example.com
 cargo run -p lemontodo-tui -- sync connect --email you@example.com
 cargo run -p lemontodo-tui -- sync connect --email you@example.com --pull
@@ -196,7 +195,6 @@ ltd vault init
 ltd vault status
 ltd sync pack --out ./sync-pack.json
 ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-ltd sync register --email you@example.com
 ltd sync login --email you@example.com
 ltd sync connect --email you@example.com
 ltd sync connect --email you@example.com --pull
@@ -251,6 +249,12 @@ On most Linux desktops this resolves to:
 ~/.local/share/lemontodo/lemontodo.db
 ```
 
+For account login or device connect with `--email` and no explicit `--db`, `ltd` uses an account-scoped database path:
+
+```text
+<data-dir>/lemontodo/accounts/<server-component>/<email-component>/lemontodo.db
+```
+
 Use `--db` to override the database path. This is useful for testing or keeping separate vaults:
 
 ```bash
@@ -275,6 +279,8 @@ The current `dev` branch can initialize local encrypted vault metadata, pack pen
 Tasks and projects carry a local monotonically increasing `revision`. Each pending operation records the target object revision so the future server can store opaque encrypted objects while clients reason about ordering and conflicts.
 The sync crate defines the protocol DTOs for `/v1/server-info`, `/v1/sync/push`, and `/v1/sync/pull`.
 
+Accounts are registered on the server side. The client login flow only asks for server URL, account email, and master password. The master password is used locally to derive an auth hash for server login and to unlock the downloaded encrypted vault metadata; the master password itself is not sent as the API password field.
+
 Initialize local vault metadata:
 
 ```bash
@@ -297,9 +303,7 @@ Configure a sync server and push pending encrypted operations:
 
 ```bash
 ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-ltd sync register --email you@example.com
 ltd sync login --email you@example.com
-ltd sync vault-push
 ltd sync push
 ```
 
@@ -354,10 +358,11 @@ ltd sync now --apply-safe
 `ltd sync revoke <session-id-prefix>` revokes one active session from `ltd sync sessions`. If it revokes the current session, the local token is cleared.
 `ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first. `ltd sync logout --all` revokes every active server session for the current account and then clears the local token.
 `ltd sync vault-push` uploads the local `EncryptedVaultKey` to the current server account. `ltd sync vault-pull` downloads it for a new device and refuses to overwrite local metadata unless `--force` is passed.
+`ltd sync login` verifies the server is reachable through the login request, authenticates with an auth hash derived from the account email and master password, downloads encrypted vault metadata, and verifies that the master password can unlock it before saving local session state.
 `ltd sync connect` is the recommended new-device onboarding command: it logs into the server account, downloads encrypted vault metadata, verifies that the provided master password can unlock it locally, and only then saves the local token and metadata. With `--pull`, it immediately downloads the first batch of encrypted remote operations into the local inbox. With `--pull --apply-safe`, it also runs the same safe automatic apply path as `ltd sync apply`, leaving skipped and conflicting items in the inbox.
 When the server rejects the stored token because it is invalid or expired, sync commands now return a direct hint to run `ltd sync login` again.
 The client sends a session device id plus a best-effort device name on login/connect. Set `LEMONTODO_DEVICE_NAME` to override the inferred hostname.
-These commands prompt for the master password without echoing it to the terminal. Registration and login also prompt for the account password without echoing it. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
+These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a server auth hash plus a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:
 
@@ -373,7 +378,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, inspect the current authenticated account/session, list and revoke active sessions/devices, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, enforce server-configured session TTL expiry, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement full conflict resolution yet.
+This is still an E2EE sync dry-run. It can log in with a derived auth hash to obtain a local access token, inspect the current authenticated account/session, list and revoke active sessions/devices, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, enforce server-configured session TTL expiry, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement full conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 

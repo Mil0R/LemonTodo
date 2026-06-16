@@ -12,7 +12,6 @@ SERVER_HOST="${LEMONTODO_SERVER_HOST:-127.0.0.1}"
 SERVER_PORT="${LEMONTODO_SERVER_PORT:-8787}"
 SERVER_URL="http://${SERVER_HOST}:${SERVER_PORT}"
 ACCOUNT_EMAIL="${LEMONTODO_E2E_EMAIL:-you@example.com}"
-ACCOUNT_PASSWORD="${LEMONTODO_E2E_PASSWORD:-dev-password}"
 MASTER_PASSWORD="${LEMONTODO_E2E_MASTER_PASSWORD:-dev-master-password}"
 PROJECT_NAME="${LEMONTODO_E2E_PROJECT:-LemonTodo}"
 TASK_A_TITLE="${LEMONTODO_E2E_TASK_A:-Task from device A}"
@@ -93,11 +92,9 @@ start_server() {
 init_client_a() {
     log "initializing client A"
     run_ltd --db "${CLIENT_A_DB}" init
-    run_ltd --db "${CLIENT_A_DB}" vault init --master-password "${MASTER_PASSWORD}"
     run_ltd --db "${CLIENT_A_DB}" sync configure --server-url "${SERVER_URL}" --email "${ACCOUNT_EMAIL}"
-    run_ltd --db "${CLIENT_A_DB}" sync register --email "${ACCOUNT_EMAIL}" --password "${ACCOUNT_PASSWORD}"
-    run_ltd --db "${CLIENT_A_DB}" sync login --email "${ACCOUNT_EMAIL}" --password "${ACCOUNT_PASSWORD}"
-    run_ltd --db "${CLIENT_A_DB}" sync vault-push
+    run_ltd --db "${CLIENT_A_DB}" sync register --email "${ACCOUNT_EMAIL}" --master-password "${MASTER_PASSWORD}"
+    run_ltd --db "${CLIENT_A_DB}" sync login --email "${ACCOUNT_EMAIL}" --master-password "${MASTER_PASSWORD}"
 }
 
 seed_client_a() {
@@ -113,7 +110,6 @@ connect_client_b() {
     run_ltd --db "${CLIENT_B_DB}" sync configure --server-url "${SERVER_URL}" --email "${ACCOUNT_EMAIL}"
     run_ltd --db "${CLIENT_B_DB}" sync connect \
         --email "${ACCOUNT_EMAIL}" \
-        --password "${ACCOUNT_PASSWORD}" \
         --master-password "${MASTER_PASSWORD}" \
         --pull \
         --apply-safe

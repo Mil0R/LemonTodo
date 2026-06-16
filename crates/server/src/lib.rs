@@ -213,6 +213,48 @@ impl ServerStore {
         Ok(user)
     }
 
+    pub fn create_user_with_vault(
+        &mut self,
+        email: &str,
+        auth_hash: &str,
+        encrypted_vault_key_json: &str,
+        is_admin: bool,
+    ) -> Result<UserAccount> {
+        let email = normalize_email(email)?;
+        let auth_hash = auth_hash.trim();
+        if auth_hash.is_empty() {
+            anyhow::bail!("auth hash cannot be empty");
+        }
+        if encrypted_vault_key_json.trim().is_empty() {
+            anyhow::bail!("encrypted vault key cannot be empty");
+        }
+        if self.find_user_by_email(&email)?.is_some() {
+            anyhow::bail!("user already exists: {email}");
+        }
+
+        let user = UserAccount {
+            id: Uuid::new_v4(),
+            email,
+            password_hash: hash_password(auth_hash)?,
+            is_admin,
+            encrypted_vault_key_json: Some(encrypted_vault_key_json.to_owned()),
+            created_at: Utc::now(),
+        };
+        self.conn.execute(
+            "INSERT INTO users (id, email, password_hash, is_admin, encrypted_vault_key_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                user.id.to_string(),
+                user.email,
+                user.password_hash,
+                user.is_admin,
+                user.encrypted_vault_key_json,
+                user.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(user)
+    }
+
     pub fn create_session(
         &mut self,
         user: &UserAccount,
@@ -692,16 +734,30 @@ async fn account_register(
             "store lock poisoned".to_owned(),
         )
     })?;
+    let encrypted_vault_key_json =
+        serde_json::to_string(&request.encrypted_vault_key).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid encrypted vault key: {error}"),
+            )
+        })?;
     let user = store
-        .create_user(&request.email, &request.password, false)
+        .create_user_with_vault(
+            &request.email,
+            &request.auth_hash,
+            &encrypted_vault_key_json,
+            false,
+        )
         .map_err(|error| {
             let message = error.to_string();
-            let status =
-                if message.contains("already exists") || message.contains("cannot be empty") {
-                    StatusCode::BAD_REQUEST
-                } else {
-                    StatusCode::INTERNAL_SERVER_ERROR
-                };
+            let status = if message.contains("already exists")
+                || message.contains("cannot be empty")
+                || message.contains("auth hash")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
             (status, message)
         })?;
     Ok(Json(RegisterResponse {
@@ -725,7 +781,7 @@ async fn account_login(
         .find_user_by_email(&request.email)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
         .ok_or((StatusCode::UNAUTHORIZED, "invalid credentials".to_owned()))?;
-    verify_password(&request.password, &user.password_hash)
+    verify_password(&request.auth_hash, &user.password_hash)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid credentials".to_owned()))?;
     let session = store
         .create_session(&user, Some(request.device_id), Some(&request.device_name))
@@ -1134,6 +1190,19 @@ mod tests {
 
     use super::*;
 
+    fn register_request(email: &str) -> RegisterRequest {
+        RegisterRequest {
+            email: email.to_owned(),
+            auth_hash: "dev-auth-hash".to_owned(),
+            encrypted_vault_key: wrap_vault_key(
+                &VaultKey::generate(),
+                "dev-password",
+                KdfParams::generate_interactive(),
+            )
+            .unwrap(),
+        }
+    }
+
     #[test]
     fn loads_default_config() {
         let config = ServerConfig::from_lookup(|_| None).unwrap();
@@ -1259,10 +1328,7 @@ mod tests {
 
         let Json(response) = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "User@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("User@example.com")),
         )
         .await
         .unwrap();
@@ -1277,15 +1343,9 @@ mod tests {
     async fn register_handler_rejects_when_registration_is_disabled() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::open(test_server_config(dir.path().join("server.db"))).unwrap();
-        let error = account_register(
-            State(state),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
-        )
-        .await
-        .unwrap_err();
+        let error = account_register(State(state), Json(register_request("user@example.com")))
+            .await
+            .unwrap_err();
         assert_eq!(error.0, StatusCode::FORBIDDEN);
     }
 
@@ -1297,10 +1357,7 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
@@ -1309,7 +1366,7 @@ mod tests {
             State(state),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "test-device".to_owned(),
             }),
@@ -1329,10 +1386,7 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
@@ -1340,7 +1394,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "test-device".to_owned(),
             }),
@@ -1374,10 +1428,7 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
@@ -1385,7 +1436,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "test-device".to_owned(),
             }),
@@ -1427,10 +1478,7 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
@@ -1439,7 +1487,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id,
                 device_name: "workstation".to_owned(),
             }),
@@ -1461,7 +1509,7 @@ mod tests {
 
         assert_eq!(status.email, "user@example.com");
         assert!(!status.is_admin);
-        assert!(!status.has_vault_key);
+        assert!(status.has_vault_key);
         assert_eq!(status.session_device_id, Some(device_id));
         assert_eq!(status.session_device_name.as_deref(), Some("workstation"));
         assert_eq!(status.session_created_at, initial_session.created_at);
@@ -1483,10 +1531,7 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
@@ -1494,7 +1539,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "test-device".to_owned(),
             }),
@@ -1534,10 +1579,7 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
@@ -1546,7 +1588,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: first_device_id,
                 device_name: "laptop".to_owned(),
             }),
@@ -1558,7 +1600,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: second_device_id,
                 device_name: "desktop".to_owned(),
             }),
@@ -1599,10 +1641,7 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
@@ -1610,7 +1649,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "laptop".to_owned(),
             }),
@@ -1621,7 +1660,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "desktop".to_owned(),
             }),
@@ -1655,10 +1694,7 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
@@ -1666,7 +1702,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "laptop".to_owned(),
             }),
@@ -1699,19 +1735,13 @@ mod tests {
         let state = AppState::open(config).unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("user@example.com")),
         )
         .await
         .unwrap();
         let _ = account_register(
             State(state.clone()),
-            Json(RegisterRequest {
-                email: "other@example.com".to_owned(),
-                password: "dev-password".to_owned(),
-            }),
+            Json(register_request("other@example.com")),
         )
         .await
         .unwrap();
@@ -1719,7 +1749,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "laptop".to_owned(),
             }),
@@ -1730,7 +1760,7 @@ mod tests {
             State(state.clone()),
             Json(LoginRequest {
                 email: "other@example.com".to_owned(),
-                password: "dev-password".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
                 device_id: Uuid::new_v4(),
                 device_name: "desktop".to_owned(),
             }),

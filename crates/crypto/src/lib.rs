@@ -179,6 +179,26 @@ pub fn unwrap_vault_key(encrypted: &EncryptedVaultKey, master_password: &str) ->
     VaultKey::from_bytes(&plaintext)
 }
 
+pub fn derive_auth_hash(email: &str, master_password: &str) -> Result<String> {
+    let email = email.trim().to_ascii_lowercase();
+    if email.is_empty() {
+        bail!("email cannot be empty");
+    }
+    if master_password.is_empty() {
+        bail!("master password cannot be empty");
+    }
+
+    let salt = format!("lemontodo:auth:v1:{email}");
+    let params = Params::new(64 * 1024, 3, 1, Some(VAULT_KEY_LEN))
+        .map_err(|error| anyhow::anyhow!("invalid auth kdf params: {error}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut output = [0_u8; VAULT_KEY_LEN];
+    argon2
+        .hash_password_into(master_password.as_bytes(), salt.as_bytes(), &mut output)
+        .map_err(|error| anyhow::anyhow!("failed to derive auth hash: {error}"))?;
+    Ok(hex::encode(output))
+}
+
 fn derive_wrapping_key(master_password: &str, kdf: &KdfParams) -> Result<VaultKey> {
     if kdf.algorithm != "argon2id" {
         bail!("unsupported kdf algorithm {}", kdf.algorithm);
@@ -238,5 +258,15 @@ mod tests {
         let unwrapped = unwrap_vault_key(&encrypted, "correct horse battery staple").unwrap();
         assert_eq!(unwrapped, vault_key);
         assert!(unwrap_vault_key(&encrypted, "wrong password").is_err());
+    }
+
+    #[test]
+    fn derives_stable_auth_hash_from_normalized_email() {
+        let first = derive_auth_hash("USER@example.com ", "dev-password").unwrap();
+        let second = derive_auth_hash("user@example.com", "dev-password").unwrap();
+        let different = derive_auth_hash("user@example.com", "other-password").unwrap();
+
+        assert_eq!(first, second);
+        assert_ne!(first, different);
     }
 }
