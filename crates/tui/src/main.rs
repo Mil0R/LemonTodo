@@ -3,7 +3,7 @@ mod ui;
 
 use std::{collections::HashMap, fs, io, path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
 use clap::{Parser, Subcommand};
 use crossterm::{
@@ -587,22 +587,21 @@ fn main() -> Result<()> {
                     "Pending remote operations {}",
                     store.pending_remote_operation_count()?
                 );
+                if store.sync_server_url()?.is_some() && store.sync_access_token()?.is_some() {
+                    match fetch_account_status(&store, None) {
+                        Ok(status) => print_remote_account_status(&status),
+                        Err(error) => println!("Remote status error {error}"),
+                    }
+                } else {
+                    println!("Remote account <unavailable>");
+                }
             }
             SyncCommand::Whoami { json, server_url } => {
                 let status = fetch_account_status(&store, server_url.as_deref())?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 } else {
-                    println!("User {}", status.email);
-                    println!("User id {}", status.user_id);
-                    println!("Admin {}", status.is_admin);
-                    println!("Vault key {}", status.has_vault_key);
-                    println!("User created {}", status.user_created_at.to_rfc3339());
-                    println!("Session created {}", status.session_created_at.to_rfc3339());
-                    println!(
-                        "Session last used {}",
-                        status.session_last_used_at.to_rfc3339()
-                    );
+                    print_remote_account_status(&status);
                 }
             }
             SyncCommand::Keygen => {
@@ -1064,58 +1063,126 @@ fn fetch_account_status(
     get_account_status_request(&server_url, &access_token)
 }
 
+fn print_remote_account_status(status: &AccountStatusResponse) {
+    println!("Remote user {}", status.email);
+    println!("Remote user id {}", status.user_id);
+    println!("Remote admin {}", status.is_admin);
+    println!("Remote vault key {}", status.has_vault_key);
+    println!(
+        "Remote user created {}",
+        status.user_created_at.to_rfc3339()
+    );
+    println!(
+        "Remote session created {}",
+        status.session_created_at.to_rfc3339()
+    );
+    println!(
+        "Remote session last used {}",
+        status.session_last_used_at.to_rfc3339()
+    );
+}
+
+fn auth_hint_from_message(message: &str) -> Option<&'static str> {
+    if message.contains("expired access token") {
+        Some("server rejected the stored access token as expired; run ltd sync login again")
+    } else if message.contains("invalid access token") {
+        Some("server rejected the stored access token; run ltd sync login again")
+    } else {
+        None
+    }
+}
+
+fn checked_response(
+    endpoint: &str,
+    response: std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<ureq::http::Response<ureq::Body>> {
+    match response {
+        Ok(response) => Ok(response),
+        Err(ureq::Error::StatusCode(code)) => {
+            let message = format!("request failed with HTTP {code} at {endpoint}");
+            if code == 401 {
+                bail!("{message}: run ltd sync login again");
+            }
+            bail!("{message}");
+        }
+        Err(error) => Err(anyhow!(error)).with_context(|| format!("request failed for {endpoint}")),
+    }
+}
+
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent()
+}
+
+fn checked_json_response<T: serde::de::DeserializeOwned>(
+    endpoint: &str,
+    response: ureq::http::Response<ureq::Body>,
+    parse_context: &str,
+) -> Result<T> {
+    let status = response.status().as_u16();
+    let mut body = response.into_body();
+    if (200..300).contains(&status) {
+        return body
+            .read_json::<T>()
+            .with_context(|| parse_context.to_owned());
+    }
+    let message = body.read_to_string().unwrap_or_default();
+    if let Some(hint) = auth_hint_from_message(&message) {
+        bail!("{hint}");
+    }
+    let detail = if message.trim().is_empty() {
+        format!("request failed with HTTP {status} at {endpoint}")
+    } else {
+        format!(
+            "request failed with HTTP {status} at {endpoint}: {}",
+            message.trim()
+        )
+    };
+    bail!("{detail}");
+}
+
 fn post_push_request(server_url: &str, request: &PushRequest) -> Result<PushResponse> {
     let endpoint = format!("{server_url}/v1/sync/push");
-    let response = ureq::post(&endpoint)
-        .content_type("application/json")
-        .send_json(request)
-        .with_context(|| format!("failed to POST {endpoint}"))?;
-    response
-        .into_body()
-        .read_json::<PushResponse>()
-        .context("failed to parse push response")
+    let response = checked_response(
+        &endpoint,
+        http_agent()
+            .post(&endpoint)
+            .content_type("application/json")
+            .send_json(request),
+    )?;
+    checked_json_response(&endpoint, response, "failed to parse push response")
 }
 
 fn post_pull_request(server_url: &str, request: &PullRequest) -> Result<PullResponse> {
     let endpoint = format!("{server_url}/v1/sync/pull");
-    let response = ureq::post(&endpoint)
-        .content_type("application/json")
-        .send_json(request)
-        .with_context(|| format!("failed to POST {endpoint}"))?;
-    response
-        .into_body()
-        .read_json::<PullResponse>()
-        .context("failed to parse pull response")
+    let response = checked_response(
+        &endpoint,
+        http_agent()
+            .post(&endpoint)
+            .content_type("application/json")
+            .send_json(request),
+    )?;
+    checked_json_response(&endpoint, response, "failed to parse pull response")
 }
 
 fn post_register_request(server_url: &str, request: &RegisterRequest) -> Result<RegisterResponse> {
     let endpoint = format!("{server_url}/v1/account/register");
-    ureq::post(&endpoint)
-        .send_json(request)
-        .with_context(|| format!("failed to POST {endpoint}"))?
-        .body_mut()
-        .read_json::<RegisterResponse>()
-        .context("failed to parse register response")
+    let response = checked_response(&endpoint, http_agent().post(&endpoint).send_json(request))?;
+    checked_json_response(&endpoint, response, "failed to parse register response")
 }
 
 fn post_login_request(server_url: &str, request: &LoginRequest) -> Result<LoginResponse> {
     let endpoint = format!("{server_url}/v1/account/login");
-    ureq::post(&endpoint)
-        .send_json(request)
-        .with_context(|| format!("failed to POST {endpoint}"))?
-        .body_mut()
-        .read_json::<LoginResponse>()
-        .context("failed to parse login response")
+    let response = checked_response(&endpoint, http_agent().post(&endpoint).send_json(request))?;
+    checked_json_response(&endpoint, response, "failed to parse login response")
 }
 
 fn post_logout_request(server_url: &str, request: &LogoutRequest) -> Result<LogoutResponse> {
     let endpoint = format!("{server_url}/v1/account/logout");
-    ureq::post(&endpoint)
-        .send_json(request)
-        .with_context(|| format!("failed to POST {endpoint}"))?
-        .body_mut()
-        .read_json::<LogoutResponse>()
-        .context("failed to parse logout response")
+    let response = checked_response(&endpoint, http_agent().post(&endpoint).send_json(request))?;
+    checked_json_response(&endpoint, response, "failed to parse logout response")
 }
 
 fn get_account_status_request(
@@ -1123,13 +1190,18 @@ fn get_account_status_request(
     access_token: &str,
 ) -> Result<AccountStatusResponse> {
     let endpoint = format!("{server_url}/v1/account/me");
-    ureq::get(&endpoint)
-        .query("access_token", access_token)
-        .call()
-        .with_context(|| format!("failed to GET {endpoint}"))?
-        .body_mut()
-        .read_json::<AccountStatusResponse>()
-        .context("failed to parse account status response")
+    let response = checked_response(
+        &endpoint,
+        http_agent()
+            .get(&endpoint)
+            .query("access_token", access_token)
+            .call(),
+    )?;
+    checked_json_response(
+        &endpoint,
+        response,
+        "failed to parse account status response",
+    )
 }
 
 fn put_vault_metadata_request(
@@ -1137,12 +1209,12 @@ fn put_vault_metadata_request(
     request: &PutVaultMetadataRequest,
 ) -> Result<VaultMetadataResponse> {
     let endpoint = format!("{server_url}/v1/account/vault-key");
-    ureq::put(&endpoint)
-        .send_json(request)
-        .with_context(|| format!("failed to PUT {endpoint}"))?
-        .body_mut()
-        .read_json::<VaultMetadataResponse>()
-        .context("failed to parse vault metadata response")
+    let response = checked_response(&endpoint, http_agent().put(&endpoint).send_json(request))?;
+    checked_json_response(
+        &endpoint,
+        response,
+        "failed to parse vault metadata response",
+    )
 }
 
 fn get_vault_metadata_request(
@@ -1150,13 +1222,18 @@ fn get_vault_metadata_request(
     access_token: &str,
 ) -> Result<VaultMetadataResponse> {
     let endpoint = format!("{server_url}/v1/account/vault-key");
-    ureq::get(&endpoint)
-        .query("access_token", access_token)
-        .call()
-        .with_context(|| format!("failed to GET {endpoint}"))?
-        .body_mut()
-        .read_json::<VaultMetadataResponse>()
-        .context("failed to parse vault metadata response")
+    let response = checked_response(
+        &endpoint,
+        http_agent()
+            .get(&endpoint)
+            .query("access_token", access_token)
+            .call(),
+    )?;
+    checked_json_response(
+        &endpoint,
+        response,
+        "failed to parse vault metadata response",
+    )
 }
 
 fn configured_server_url(store: &TodoStore, override_url: Option<&str>) -> Result<String> {
