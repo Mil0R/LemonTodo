@@ -17,8 +17,8 @@ use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
     AccountStatusResponse, LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
     PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse,
-    PutVaultMetadataRequest, RegisterRequest, RegisterResponse, VaultMetadataResponse,
-    pack_operations, unpack_operation,
+    PutVaultMetadataRequest, RegisterRequest, RegisterResponse, SessionsResponse,
+    VaultMetadataResponse, pack_operations, unpack_operation,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -190,6 +190,15 @@ enum SyncCommand {
     Status,
     /// Show the current authenticated server account for the stored access token.
     Whoami {
+        /// Print the server response as pretty JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the configured server URL for this request.
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// List active server sessions for the current account.
+    Sessions {
         /// Print the server response as pretty JSON.
         #[arg(long)]
         json: bool,
@@ -602,6 +611,14 @@ fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 } else {
                     print_remote_account_status(&status);
+                }
+            }
+            SyncCommand::Sessions { json, server_url } => {
+                let sessions = fetch_sessions(&store, server_url.as_deref())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&sessions)?);
+                } else {
+                    print_sessions(&sessions);
                 }
             }
             SyncCommand::Keygen => {
@@ -1067,6 +1084,12 @@ fn fetch_account_status(
     get_account_status_request(&server_url, &access_token)
 }
 
+fn fetch_sessions(store: &TodoStore, server_url: Option<&str>) -> Result<SessionsResponse> {
+    let server_url = configured_server_url(store, server_url)?;
+    let access_token = configured_access_token(store)?;
+    get_sessions_request(&server_url, &access_token)
+}
+
 fn print_remote_account_status(status: &AccountStatusResponse) {
     println!("Remote user {}", status.email);
     println!("Remote user id {}", status.user_id);
@@ -1098,6 +1121,33 @@ fn print_remote_account_status(status: &AccountStatusResponse) {
             .clone()
             .unwrap_or_else(|| "<unknown>".to_owned())
     );
+}
+
+fn print_sessions(response: &SessionsResponse) {
+    if response.sessions.is_empty() {
+        println!("No active sessions");
+        return;
+    }
+    for session in &response.sessions {
+        let current = if session.current { "current" } else { "active" };
+        let device_id = session
+            .device_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        let device_name = session
+            .device_name
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_owned());
+        println!(
+            "{} {} {} {} created:{} last-used:{}",
+            session.session_id,
+            current,
+            device_name,
+            device_id,
+            session.created_at.to_rfc3339(),
+            session.last_used_at.to_rfc3339()
+        );
+    }
 }
 
 fn auth_hint_from_message(message: &str) -> Option<&'static str> {
@@ -1240,6 +1290,18 @@ fn get_account_status_request(
         response,
         "failed to parse account status response",
     )
+}
+
+fn get_sessions_request(server_url: &str, access_token: &str) -> Result<SessionsResponse> {
+    let endpoint = format!("{server_url}/v1/account/sessions");
+    let response = checked_response(
+        &endpoint,
+        http_agent()
+            .get(&endpoint)
+            .query("access_token", access_token)
+            .call(),
+    )?;
+    checked_json_response(&endpoint, response, "failed to parse sessions response")
 }
 
 fn put_vault_metadata_request(

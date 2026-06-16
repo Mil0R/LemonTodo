@@ -16,7 +16,8 @@ use lemontodo_sync::{
     AcceptedSyncObject, AccountStatusResponse, EncryptedSyncObject, LoginRequest, LoginResponse,
     LogoutRequest, LogoutResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest,
     PushResponse, PutVaultMetadataRequest, RegisterRequest, RegisterResponse, RejectedSyncObject,
-    RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo, VaultMetadataResponse,
+    RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo, SessionInfo, SessionsResponse,
+    VaultMetadataResponse,
 };
 use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -295,6 +296,46 @@ impl ServerStore {
         Ok(deleted > 0)
     }
 
+    pub fn active_sessions(
+        &mut self,
+        user_id: Uuid,
+        current_token: &str,
+        session_ttl: Duration,
+    ) -> Result<Vec<SessionInfo>> {
+        let cutoff = Utc::now() - session_ttl;
+        self.conn
+            .execute(
+                "DELETE FROM user_sessions WHERE user_id = ?1 AND last_used_at < ?2",
+                params![user_id.to_string(), cutoff.to_rfc3339()],
+            )
+            .context("failed to delete expired sessions")?;
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT token, user_id, created_at, last_used_at, device_id, device_name
+                 FROM user_sessions
+                 WHERE user_id = ?1
+                 ORDER BY last_used_at DESC",
+            )
+            .context("failed to prepare session query")?;
+        let sessions = stmt
+            .query_map(params![user_id.to_string()], row_to_user_session)?
+            .map(|row| {
+                row.map(|session| SessionInfo {
+                    session_id: token_prefix(&session.token),
+                    current: session.token == current_token,
+                    created_at: session.created_at,
+                    last_used_at: session.last_used_at,
+                    device_id: session.device_id,
+                    device_name: session.device_name,
+                })
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to query sessions")?;
+        Ok(sessions)
+    }
+
     pub fn set_encrypted_vault_key(
         &mut self,
         user_id: Uuid,
@@ -548,6 +589,7 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/account/login", axum::routing::post(account_login))
         .route("/v1/account/logout", axum::routing::post(account_logout))
         .route("/v1/account/me", get(account_me))
+        .route("/v1/account/sessions", get(account_sessions))
         .route("/v1/account/vault-key", get(account_get_vault_key))
         .route(
             "/v1/account/vault-key",
@@ -691,6 +733,29 @@ async fn account_me(
         session_device_id: session.device_id,
         session_device_name: session.device_name,
     }))
+}
+
+async fn account_sessions(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<SessionsResponse>, (StatusCode, String)> {
+    let access_token = query
+        .get("access_token")
+        .map(String::as_str)
+        .ok_or((StatusCode::BAD_REQUEST, "missing access_token".to_owned()))?;
+    let mut store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    let (user, _) = store
+        .authenticate_with_session(access_token, session_ttl(&state.config))
+        .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
+    let sessions = store
+        .active_sessions(user.id, access_token, session_ttl(&state.config))
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    Ok(Json(SessionsResponse { sessions }))
 }
 
 async fn account_get_vault_key(
@@ -884,6 +949,10 @@ fn parse_cursor(cursor: Option<&str>) -> Result<i64> {
 fn normalized_limit(limit: u32) -> i64 {
     let limit = if limit == 0 { 1 } else { limit };
     i64::from(limit.min(500))
+}
+
+fn token_prefix(token: &str) -> String {
+    token.chars().take(8).collect()
 }
 
 fn normalize_email(email: &str) -> Result<String> {
@@ -1373,6 +1442,71 @@ mod tests {
 
         let store = state.store.lock().unwrap();
         assert!(store.find_session(&login.access_token).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn account_sessions_lists_active_sessions_for_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let first_device_id = Uuid::new_v4();
+        let Json(first) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+                device_id: first_device_id,
+                device_name: "laptop".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let second_device_id = Uuid::new_v4();
+        let Json(second) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+                device_id: second_device_id,
+                device_name: "desktop".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let mut query = HashMap::new();
+        query.insert("access_token".to_owned(), second.access_token.clone());
+        let Json(response) = account_sessions(State(state), axum::extract::Query(query))
+            .await
+            .unwrap();
+
+        assert_eq!(response.sessions.len(), 2);
+        let current = response
+            .sessions
+            .iter()
+            .find(|session| session.current)
+            .unwrap();
+        assert_eq!(current.session_id, token_prefix(&second.access_token));
+        assert_eq!(current.device_id, Some(second_device_id));
+        assert_eq!(current.device_name.as_deref(), Some("desktop"));
+        let other = response
+            .sessions
+            .iter()
+            .find(|session| session.session_id == token_prefix(&first.access_token))
+            .unwrap();
+        assert!(!other.current);
+        assert_eq!(other.device_id, Some(first_device_id));
+        assert_eq!(other.device_name.as_deref(), Some("laptop"));
     }
 
     #[test]

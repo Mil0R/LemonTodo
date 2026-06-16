@@ -94,6 +94,7 @@ POST /v1/account/register
 POST /v1/account/login
 POST /v1/account/logout
 GET /v1/account/me
+GET /v1/account/sessions
 GET /v1/account/vault-key
 PUT /v1/account/vault-key
 POST /v1/sync/push

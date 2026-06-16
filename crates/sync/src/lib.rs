@@ -199,6 +199,21 @@ pub struct AccountStatusResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub session_id: String,
+    pub current: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: DateTime<Utc>,
+    pub device_id: Option<Uuid>,
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionsResponse {
+    pub sessions: Vec<SessionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutVaultMetadataRequest {
     pub access_token: String,
     pub encrypted_vault_key: EncryptedVaultKey,
@@ -406,5 +421,21 @@ mod tests {
         assert_eq!(json["session_device_id"], Uuid::nil().to_string());
         assert_eq!(json["session_device_name"], "workstation");
         assert!(json.get("session_last_used_at").is_some());
+
+        let sessions = SessionsResponse {
+            sessions: vec![SessionInfo {
+                session_id: "abc12345".to_owned(),
+                current: true,
+                created_at: Utc::now(),
+                last_used_at: Utc::now(),
+                device_id: Some(Uuid::nil()),
+                device_name: Some("workstation".to_owned()),
+            }],
+        };
+        let json = serde_json::to_value(&sessions).unwrap();
+        assert_eq!(json["sessions"][0]["session_id"], "abc12345");
+        assert_eq!(json["sessions"][0]["current"], true);
+        assert_eq!(json["sessions"][0]["device_id"], Uuid::nil().to_string());
+        assert_eq!(json["sessions"][0]["device_name"], "workstation");
     }
 }
