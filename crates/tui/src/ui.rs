@@ -8,9 +8,9 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Mode, ViewMode};
+use crate::app::{App, Mode, SyncStatus, ViewMode};
 
-const SHORT_HELP: &str = "j/k select  space toggle  a add  e edit  m move  ? help  q quit";
+const SHORT_HELP: &str = "j/k select  space toggle  a add  e edit  m move  s sync  ? help  q quit";
 const READY_MESSAGE: &str = "Ready";
 const PROJECT_CELL_WIDTH: usize = 28;
 const VIEW_CELL_WIDTH: usize = 13;
@@ -32,6 +32,10 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 
     if app.help_visible() {
         draw_help(frame, area);
+    }
+
+    if app.sync_status_visible() {
+        draw_sync_status(frame, area, app.sync_status());
     }
 
     if app.mode() != Mode::Browse {
@@ -174,6 +178,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("  r              refresh"),
+        Line::from("  s              sync status"),
         Line::from("  ?              toggle this help"),
         Line::from("  Esc            close help"),
         Line::from("  q              quit"),
@@ -183,6 +188,79 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
         .block(Block::default().title("Help").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     frame.render_widget(help, popup);
+}
+
+fn draw_sync_status(frame: &mut ratatui::Frame<'_>, area: Rect, status: Option<&SyncStatus>) {
+    let popup = centered_rect(72, 48, area);
+    frame.render_widget(Clear, popup);
+
+    let lines = if let Some(status) = status {
+        vec![
+            Line::from(vec![Span::styled(
+                "Local",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            status_line(
+                "server",
+                status.server.as_deref().unwrap_or("<not configured>"),
+            ),
+            status_line(
+                "account",
+                status.account.as_deref().unwrap_or("<not configured>"),
+            ),
+            status_line(
+                "access token",
+                if status.access_token_configured {
+                    "configured"
+                } else {
+                    "<not configured>"
+                },
+            ),
+            status_line(
+                "vault metadata",
+                if status.vault_metadata_configured {
+                    "configured"
+                } else {
+                    "<not initialized>"
+                },
+            ),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Queue",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            status_line(
+                "pending local ops",
+                status.pending_local_operations.to_string(),
+            ),
+            status_line(
+                "pending remote ops",
+                status.pending_remote_operations.to_string(),
+            ),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Esc closes this panel",
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+        ]
+    } else {
+        vec![Line::from("Sync status is not loaded")]
+    };
+
+    let status = Paragraph::new(lines)
+        .block(Block::default().title("Sync Status").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(status, popup);
+}
+
+fn status_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(
+            format!("  {label:<18}"),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(value.into()),
+    ])
 }
 
 fn input_footer<'a>(title: &'a str, input: &'a str) -> Paragraph<'a> {

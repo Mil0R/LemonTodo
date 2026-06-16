@@ -1638,6 +1638,7 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
     match app.mode() {
         Mode::Browse => match key.code {
             KeyCode::Esc if app.help_visible() => app.hide_help(),
+            KeyCode::Esc if app.sync_status_visible() => app.hide_sync_status(),
             KeyCode::Char('?') => app.toggle_help(),
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => app.move_down(),
@@ -1655,6 +1656,7 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
             KeyCode::Char('/') => app.start_search(),
             KeyCode::Char('c') => app.clear_search()?,
             KeyCode::Char('x') => app.archive_selected()?,
+            KeyCode::Char('s') => app.toggle_sync_status()?,
             KeyCode::Char('r') => {
                 app.refresh()?;
             }

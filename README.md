@@ -220,9 +220,10 @@ TUI controls:
 - `/`: search tasks
 - `c`: clear search
 - `x`: archive selected task
+- `s`: show or hide local sync status
 - `?`: show or hide full help
 - `Enter`: submit task while adding
-- `Esc`: close help or cancel input mode
+- `Esc`: close help/sync status or cancel input mode
 - `r`: refresh
 - `q`: quit
 

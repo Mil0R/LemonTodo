@@ -16,6 +16,8 @@ pub struct App {
     mode: Mode,
     view_mode: ViewMode,
     help_visible: bool,
+    sync_status_visible: bool,
+    sync_status: Option<SyncStatus>,
     message: String,
     search_query: String,
 }
@@ -44,6 +46,16 @@ pub enum ViewMode {
     Detail,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncStatus {
+    pub server: Option<String>,
+    pub account: Option<String>,
+    pub access_token_configured: bool,
+    pub vault_metadata_configured: bool,
+    pub pending_local_operations: usize,
+    pub pending_remote_operations: usize,
+}
+
 impl App {
     pub fn new(store: TodoStore) -> Result<Self> {
         let mut app = Self {
@@ -57,6 +69,8 @@ impl App {
             mode: Mode::Browse,
             view_mode: ViewMode::Compact,
             help_visible: false,
+            sync_status_visible: false,
+            sync_status: None,
             message: String::new(),
             search_query: String::new(),
         };
@@ -116,6 +130,14 @@ impl App {
 
     pub fn help_visible(&self) -> bool {
         self.help_visible
+    }
+
+    pub fn sync_status_visible(&self) -> bool {
+        self.sync_status_visible
+    }
+
+    pub fn sync_status(&self) -> Option<&SyncStatus> {
+        self.sync_status.as_ref()
     }
 
     pub fn message(&self) -> &str {
@@ -211,14 +233,34 @@ impl App {
 
     pub fn toggle_help(&mut self) {
         self.help_visible = !self.help_visible;
+        if self.help_visible {
+            self.sync_status_visible = false;
+        }
     }
 
     pub fn hide_help(&mut self) {
         self.help_visible = false;
     }
 
+    pub fn toggle_sync_status(&mut self) -> Result<()> {
+        if self.sync_status_visible {
+            self.sync_status_visible = false;
+            return Ok(());
+        }
+        self.help_visible = false;
+        self.sync_status = Some(self.load_sync_status()?);
+        self.sync_status_visible = true;
+        self.message = "Sync status".to_owned();
+        Ok(())
+    }
+
+    pub fn hide_sync_status(&mut self) {
+        self.sync_status_visible = false;
+    }
+
     pub fn start_add(&mut self) {
         self.hide_help();
+        self.hide_sync_status();
         self.mode = Mode::Add;
         self.input.clear();
         self.message = "Add task".to_owned();
@@ -226,6 +268,7 @@ impl App {
 
     pub fn start_edit_title(&mut self) {
         self.hide_help();
+        self.hide_sync_status();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -237,6 +280,7 @@ impl App {
 
     pub fn start_edit_note(&mut self) {
         self.hide_help();
+        self.hide_sync_status();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -248,6 +292,7 @@ impl App {
 
     pub fn start_edit_due(&mut self) {
         self.hide_help();
+        self.hide_sync_status();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -262,6 +307,7 @@ impl App {
 
     pub fn start_edit_tags(&mut self) {
         self.hide_help();
+        self.hide_sync_status();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -273,6 +319,7 @@ impl App {
 
     pub fn start_move_project(&mut self) {
         self.hide_help();
+        self.hide_sync_status();
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             return;
@@ -284,6 +331,7 @@ impl App {
 
     pub fn start_search(&mut self) {
         self.hide_help();
+        self.hide_sync_status();
         self.input = self.search_query.clone();
         self.mode = Mode::Search;
         self.message = "Search tasks".to_owned();
@@ -538,6 +586,17 @@ impl App {
     fn save_current_project(&self) -> Result<()> {
         self.store
             .save_tui_current_project(self.current_project_name())
+    }
+
+    fn load_sync_status(&self) -> Result<SyncStatus> {
+        Ok(SyncStatus {
+            server: self.store.sync_server_url()?,
+            account: self.store.sync_account_email()?,
+            access_token_configured: self.store.sync_access_token()?.is_some(),
+            vault_metadata_configured: self.store.encrypted_vault_key()?.is_some(),
+            pending_local_operations: self.store.pending_operations()?.len(),
+            pending_remote_operations: self.store.pending_remote_operation_count()?,
+        })
     }
 }
 
