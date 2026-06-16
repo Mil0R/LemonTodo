@@ -238,6 +238,7 @@ Follow the Bitwarden-style separation:
 - Account password authenticates to the server.
 - Master password unlocks the encrypted vault key.
 - `GET /v1/account/me` returns only authenticated account/session metadata and whether the encrypted vault key exists on the server.
+- Login also attaches per-session device metadata: a stable local device id and a best-effort device name.
 
 Registration flow:
 

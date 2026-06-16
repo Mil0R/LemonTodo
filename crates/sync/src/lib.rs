@@ -164,6 +164,8 @@ pub struct RegisterResponse {
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    pub device_id: Uuid,
+    pub device_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +194,8 @@ pub struct AccountStatusResponse {
     pub user_created_at: DateTime<Utc>,
     pub session_created_at: DateTime<Utc>,
     pub session_last_used_at: DateTime<Utc>,
+    pub session_device_id: Option<Uuid>,
+    pub session_device_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,6 +370,16 @@ mod tests {
         assert_eq!(json["cursor"], "cursor-2");
         assert_eq!(json["limit"], 100);
 
+        let login = LoginRequest {
+            email: "user@example.com".to_owned(),
+            password: "dev-password".to_owned(),
+            device_id: Uuid::nil(),
+            device_name: "workstation".to_owned(),
+        };
+        let json = serde_json::to_value(&login).unwrap();
+        assert_eq!(json["device_id"], Uuid::nil().to_string());
+        assert_eq!(json["device_name"], "workstation");
+
         let rejection = RejectedSyncObject {
             operation_id: Uuid::nil(),
             reason: RejectionReason::Duplicate,
@@ -381,12 +395,16 @@ mod tests {
             user_created_at: Utc::now(),
             session_created_at: Utc::now(),
             session_last_used_at: Utc::now(),
+            session_device_id: Some(Uuid::nil()),
+            session_device_name: Some("workstation".to_owned()),
         };
         let json = serde_json::to_value(&account).unwrap();
         assert_eq!(json["user_id"], Uuid::nil().to_string());
         assert_eq!(json["email"], "user@example.com");
         assert_eq!(json["is_admin"], false);
         assert_eq!(json["has_vault_key"], true);
+        assert_eq!(json["session_device_id"], Uuid::nil().to_string());
+        assert_eq!(json["session_device_name"], "workstation");
         assert!(json.get("session_last_used_at").is_some());
     }
 }

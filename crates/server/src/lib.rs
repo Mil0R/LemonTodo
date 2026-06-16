@@ -134,6 +134,8 @@ pub struct UserSession {
     pub user_id: Uuid,
     pub created_at: DateTime<Utc>,
     pub last_used_at: DateTime<Utc>,
+    pub device_id: Option<Uuid>,
+    pub device_name: Option<String>,
 }
 
 impl ServerStore {
@@ -210,21 +212,33 @@ impl ServerStore {
         Ok(user)
     }
 
-    pub fn create_session(&mut self, user: &UserAccount) -> Result<UserSession> {
+    pub fn create_session(
+        &mut self,
+        user: &UserAccount,
+        device_id: Option<Uuid>,
+        device_name: Option<&str>,
+    ) -> Result<UserSession> {
         let session = UserSession {
             token: Uuid::new_v4().to_string(),
             user_id: user.id,
             created_at: Utc::now(),
             last_used_at: Utc::now(),
+            device_id,
+            device_name: device_name
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
         };
         self.conn.execute(
-            "INSERT INTO user_sessions (token, user_id, created_at, last_used_at)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO user_sessions (token, user_id, created_at, last_used_at, device_id, device_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 session.token,
                 session.user_id.to_string(),
                 session.created_at.to_rfc3339(),
                 session.last_used_at.to_rfc3339(),
+                session.device_id.map(|value| value.to_string()),
+                session.device_name,
             ],
         )?;
         Ok(session)
@@ -447,7 +461,9 @@ impl ServerStore {
                 token TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                last_used_at TEXT NOT NULL
+                last_used_at TEXT NOT NULL,
+                device_id TEXT,
+                device_name TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_sync_objects_cursor
@@ -469,6 +485,8 @@ impl ServerStore {
             "TEXT NOT NULL DEFAULT ''",
         )?;
         add_column_if_missing(&self.conn, "users", "encrypted_vault_key_json", "TEXT")?;
+        add_column_if_missing(&self.conn, "user_sessions", "device_id", "TEXT")?;
+        add_column_if_missing(&self.conn, "user_sessions", "device_name", "TEXT")?;
         Ok(())
     }
 
@@ -504,7 +522,8 @@ impl ServerStore {
         }
         self.conn
             .query_row(
-                "SELECT token, user_id, created_at, last_used_at FROM user_sessions WHERE token = ?1",
+                "SELECT token, user_id, created_at, last_used_at, device_id, device_name
+                 FROM user_sessions WHERE token = ?1",
                 params![token],
                 row_to_user_session,
             )
@@ -619,7 +638,7 @@ async fn account_login(
     verify_password(&request.password, &user.password_hash)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid credentials".to_owned()))?;
     let session = store
-        .create_session(&user)
+        .create_session(&user, Some(request.device_id), Some(&request.device_name))
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(LoginResponse {
         user_id: user.id,
@@ -669,6 +688,8 @@ async fn account_me(
         user_created_at: user.created_at,
         session_created_at: session.created_at,
         session_last_used_at: session.last_used_at,
+        session_device_id: session.device_id,
+        session_device_name: session.device_name,
     }))
 }
 
@@ -942,6 +963,11 @@ fn row_to_user_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserSession>
         user_id: parse_uuid(row.get::<_, String>(1)?)?,
         created_at: parse_datetime(row.get::<_, String>(2)?)?,
         last_used_at: parse_datetime(row.get::<_, String>(3)?)?,
+        device_id: row
+            .get::<_, Option<String>>(4)?
+            .map(parse_uuid)
+            .transpose()?,
+        device_name: row.get(5)?,
     })
 }
 
@@ -1133,6 +1159,8 @@ mod tests {
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
                 password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "test-device".to_owned(),
             }),
         )
         .await
@@ -1162,6 +1190,8 @@ mod tests {
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
                 password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "test-device".to_owned(),
             }),
         )
         .await
@@ -1205,6 +1235,8 @@ mod tests {
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
                 password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "test-device".to_owned(),
             }),
         )
         .await
@@ -1251,11 +1283,14 @@ mod tests {
         )
         .await
         .unwrap();
+        let device_id = Uuid::new_v4();
         let Json(login) = account_login(
             State(state.clone()),
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
                 password: "dev-password".to_owned(),
+                device_id,
+                device_name: "workstation".to_owned(),
             }),
         )
         .await
@@ -1276,6 +1311,8 @@ mod tests {
         assert_eq!(status.email, "user@example.com");
         assert!(!status.is_admin);
         assert!(!status.has_vault_key);
+        assert_eq!(status.session_device_id, Some(device_id));
+        assert_eq!(status.session_device_name.as_deref(), Some("workstation"));
         assert_eq!(status.session_created_at, initial_session.created_at);
         assert!(status.session_last_used_at > initial_session.last_used_at);
 
@@ -1307,6 +1344,8 @@ mod tests {
             Json(LoginRequest {
                 email: "user@example.com".to_owned(),
                 password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "test-device".to_owned(),
             }),
         )
         .await
@@ -1598,7 +1637,9 @@ mod tests {
         email: &str,
     ) -> (UserAccount, UserSession) {
         let user = store.create_user(email, "dev-password", false).unwrap();
-        let session = store.create_session(&user).unwrap();
+        let session = store
+            .create_session(&user, Some(Uuid::new_v4()), Some("test-device"))
+            .unwrap();
         (user, session)
     }
 }

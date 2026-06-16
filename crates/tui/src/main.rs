@@ -962,6 +962,8 @@ fn connect_device(
         &LoginRequest {
             email: options.email.to_owned(),
             password: options.password.to_owned(),
+            device_id: store.device_id()?,
+            device_name: inferred_device_name(),
         },
     )?;
     let response = get_vault_metadata_request(&server_url, &login.access_token)?;
@@ -1036,6 +1038,8 @@ fn login_account(
         &LoginRequest {
             email: email.to_owned(),
             password: password.to_owned(),
+            device_id: store.device_id()?,
+            device_name: inferred_device_name(),
         },
     )
 }
@@ -1080,6 +1084,20 @@ fn print_remote_account_status(status: &AccountStatusResponse) {
         "Remote session last used {}",
         status.session_last_used_at.to_rfc3339()
     );
+    println!(
+        "Remote session device id {}",
+        status
+            .session_device_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "<unknown>".to_owned())
+    );
+    println!(
+        "Remote session device name {}",
+        status
+            .session_device_name
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_owned())
+    );
 }
 
 fn auth_hint_from_message(message: &str) -> Option<&'static str> {
@@ -1114,6 +1132,26 @@ fn http_agent() -> ureq::Agent {
         .http_status_as_error(false)
         .build()
         .new_agent()
+}
+
+fn inferred_device_name() -> String {
+    std::env::var("LEMONTODO_DEVICE_NAME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "unknown-device".to_owned())
 }
 
 fn checked_json_response<T: serde::de::DeserializeOwned>(

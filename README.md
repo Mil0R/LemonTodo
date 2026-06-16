@@ -325,11 +325,12 @@ ltd sync pull --json
 `ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
 `ltd sync status` shows the configured server account email, whether an access token is stored locally, whether local vault metadata exists, and when possible also fetches the current remote account/session view from the server.
-`ltd sync whoami` calls the server with the stored access token and shows which account and session the server currently sees, including whether encrypted vault metadata exists remotely.
+`ltd sync whoami` calls the server with the stored access token and shows which account and session the server currently sees, including whether encrypted vault metadata exists remotely and which device metadata is attached to that session.
 `ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first.
 `ltd sync vault push` uploads the local `EncryptedVaultKey` to the current server account. `ltd sync vault pull` downloads it for a new device and refuses to overwrite local metadata unless `--force` is passed.
 `ltd sync connect` is the recommended new-device onboarding command: it logs into the server account, downloads encrypted vault metadata, verifies that the provided master password can unlock it locally, and only then saves the local token and metadata. With `--pull`, it immediately downloads the first batch of encrypted remote operations into the local inbox. With `--pull --apply-safe`, it also runs the same safe automatic apply path as `ltd sync apply`, leaving skipped and conflicting items in the inbox.
 When the server rejects the stored token because it is invalid or expired, sync commands now return a direct hint to run `ltd sync login` again.
+The client sends a session device id plus a best-effort device name on login/connect. Set `LEMONTODO_DEVICE_NAME` to override the inferred hostname.
 These commands prompt for the master password without echoing it to the terminal. Registration and login also prompt for the account password without echoing it. This uses Argon2id to derive a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
 For scripts and local development only, `--master-password` is still supported:
