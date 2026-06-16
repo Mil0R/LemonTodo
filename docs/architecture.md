@@ -93,6 +93,7 @@ The current MVP server also exposes:
 POST /v1/account/register
 POST /v1/account/login
 POST /v1/account/logout
+GET /v1/account/me
 GET /v1/account/vault-key
 PUT /v1/account/vault-key
 POST /v1/sync/push
@@ -236,6 +237,7 @@ Follow the Bitwarden-style separation:
 
 - Account password authenticates to the server.
 - Master password unlocks the encrypted vault key.
+- `GET /v1/account/me` returns only authenticated account/session metadata and whether the encrypted vault key exists on the server.
 
 Registration flow:
 

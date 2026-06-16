@@ -77,6 +77,7 @@ GET /v1/server-info
 POST /v1/account/register
 POST /v1/account/login
 POST /v1/account/logout
+GET /v1/account/me
 GET /v1/account/vault-key
 PUT /v1/account/vault-key
 POST /v1/sync/push
@@ -143,6 +144,7 @@ cargo run -p lemontodo-tui -- sync login --email you@example.com
 cargo run -p lemontodo-tui -- sync connect --email you@example.com
 cargo run -p lemontodo-tui -- sync connect --email you@example.com --pull
 cargo run -p lemontodo-tui -- sync connect --email you@example.com --pull --apply-safe
+cargo run -p lemontodo-tui -- sync whoami
 cargo run -p lemontodo-tui -- sync logout
 cargo run -p lemontodo-tui -- sync vault push
 cargo run -p lemontodo-tui -- sync vault pull
@@ -188,6 +190,7 @@ ltd sync login --email you@example.com
 ltd sync connect --email you@example.com
 ltd sync connect --email you@example.com --pull
 ltd sync connect --email you@example.com --pull --apply-safe
+ltd sync whoami
 ltd sync status
 ltd sync logout
 ltd sync vault push
@@ -321,6 +324,7 @@ ltd sync pull --json
 `ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
 `ltd sync status` shows the configured server account email, whether an access token is stored locally, and whether local vault metadata exists.
+`ltd sync whoami` calls the server with the stored access token and shows which account and session the server currently sees, including whether encrypted vault metadata exists remotely.
 `ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first.
 `ltd sync vault push` uploads the local `EncryptedVaultKey` to the current server account. `ltd sync vault pull` downloads it for a new device and refuses to overwrite local metadata unless `--force` is passed.
 `ltd sync connect` is the recommended new-device onboarding command: it logs into the server account, downloads encrypted vault metadata, verifies that the provided master password can unlock it locally, and only then saves the local token and metadata. With `--pull`, it immediately downloads the first batch of encrypted remote operations into the local inbox. With `--pull --apply-safe`, it also runs the same safe automatic apply path as `ltd sync apply`, leaving skipped and conflicting items in the inbox.
@@ -340,7 +344,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement session expiry management or full conflict resolution yet.
+This is still an E2EE sync dry-run. It can register password-based server accounts, log in to obtain a local access token, inspect the current authenticated account/session, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement session expiry management or full conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 
@@ -352,6 +356,6 @@ ltd sync ack <operation-id-prefix> --cursor <server-cursor>
 ## Current Limitations
 
 - Remote push exists; remote pull stores pending remote operations, and apply handles safe remote creates plus safe task updates/archives.
-- Server has `/healthz`, `/v1/server-info`, `/v1/account/register`, `/v1/account/login`, `/v1/account/logout`, `/v1/account/vault-key`, and token-authenticated `/v1/sync/push` and `/v1/sync/pull`; richer device/session management is not implemented yet.
+- Server has `/healthz`, `/v1/server-info`, `/v1/account/register`, `/v1/account/login`, `/v1/account/logout`, `/v1/account/me`, `/v1/account/vault-key`, and token-authenticated `/v1/sync/push` and `/v1/sync/pull`; richer device/session management is not implemented yet.
 - OS keyring support is not implemented yet.
 - `ltd ops` only inspects the local pending operation log; `ltd sync ack` remains useful for manual dry-runs, while `ltd sync push` acknowledges accepted server uploads automatically.

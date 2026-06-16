@@ -184,6 +184,17 @@ pub struct LogoutResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountStatusResponse {
+    pub user_id: Uuid,
+    pub email: String,
+    pub is_admin: bool,
+    pub has_vault_key: bool,
+    pub user_created_at: DateTime<Utc>,
+    pub session_created_at: DateTime<Utc>,
+    pub session_last_used_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutVaultMetadataRequest {
     pub access_token: String,
     pub encrypted_vault_key: EncryptedVaultKey,
@@ -361,5 +372,21 @@ mod tests {
         };
         let json = serde_json::to_value(&rejection).unwrap();
         assert_eq!(json["reason"], "duplicate");
+
+        let account = AccountStatusResponse {
+            user_id: Uuid::nil(),
+            email: "user@example.com".to_owned(),
+            is_admin: false,
+            has_vault_key: true,
+            user_created_at: Utc::now(),
+            session_created_at: Utc::now(),
+            session_last_used_at: Utc::now(),
+        };
+        let json = serde_json::to_value(&account).unwrap();
+        assert_eq!(json["user_id"], Uuid::nil().to_string());
+        assert_eq!(json["email"], "user@example.com");
+        assert_eq!(json["is_admin"], false);
+        assert_eq!(json["has_vault_key"], true);
+        assert!(json.get("session_last_used_at").is_some());
     }
 }

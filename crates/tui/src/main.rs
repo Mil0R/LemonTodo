@@ -15,9 +15,10 @@ use lemontodo_core::{NewTask, Task, TaskStatus};
 use lemontodo_crypto::{KdfParams, VaultKey, unwrap_vault_key, wrap_vault_key};
 use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
-    LoginRequest, LoginResponse, LogoutRequest, LogoutResponse, PROTOCOL_VERSION, PullRequest,
-    PullResponse, PushRequest, PushResponse, PutVaultMetadataRequest, RegisterRequest,
-    RegisterResponse, VaultMetadataResponse, pack_operations, unpack_operation,
+    AccountStatusResponse, LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
+    PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse,
+    PutVaultMetadataRequest, RegisterRequest, RegisterResponse, VaultMetadataResponse,
+    pack_operations, unpack_operation,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -187,6 +188,15 @@ enum SyncCommand {
     },
     /// Show local sync state.
     Status,
+    /// Show the current authenticated server account for the stored access token.
+    Whoami {
+        /// Print the server response as pretty JSON.
+        #[arg(long)]
+        json: bool,
+        /// Override the configured server URL for this request.
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Generate a random local vault key as hex.
     Keygen,
     /// Pack pending operations into encrypted sync objects.
@@ -577,6 +587,23 @@ fn main() -> Result<()> {
                     "Pending remote operations {}",
                     store.pending_remote_operation_count()?
                 );
+            }
+            SyncCommand::Whoami { json, server_url } => {
+                let status = fetch_account_status(&store, server_url.as_deref())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    println!("User {}", status.email);
+                    println!("User id {}", status.user_id);
+                    println!("Admin {}", status.is_admin);
+                    println!("Vault key {}", status.has_vault_key);
+                    println!("User created {}", status.user_created_at.to_rfc3339());
+                    println!("Session created {}", status.session_created_at.to_rfc3339());
+                    println!(
+                        "Session last used {}",
+                        status.session_last_used_at.to_rfc3339()
+                    );
+                }
             }
             SyncCommand::Keygen => {
                 println!("{}", VaultKey::generate().to_hex());
@@ -1028,6 +1055,15 @@ fn logout_account(
     )
 }
 
+fn fetch_account_status(
+    store: &TodoStore,
+    server_url: Option<&str>,
+) -> Result<AccountStatusResponse> {
+    let server_url = configured_server_url(store, server_url)?;
+    let access_token = configured_access_token(store)?;
+    get_account_status_request(&server_url, &access_token)
+}
+
 fn post_push_request(server_url: &str, request: &PushRequest) -> Result<PushResponse> {
     let endpoint = format!("{server_url}/v1/sync/push");
     let response = ureq::post(&endpoint)
@@ -1080,6 +1116,20 @@ fn post_logout_request(server_url: &str, request: &LogoutRequest) -> Result<Logo
         .body_mut()
         .read_json::<LogoutResponse>()
         .context("failed to parse logout response")
+}
+
+fn get_account_status_request(
+    server_url: &str,
+    access_token: &str,
+) -> Result<AccountStatusResponse> {
+    let endpoint = format!("{server_url}/v1/account/me");
+    ureq::get(&endpoint)
+        .query("access_token", access_token)
+        .call()
+        .with_context(|| format!("failed to GET {endpoint}"))?
+        .body_mut()
+        .read_json::<AccountStatusResponse>()
+        .context("failed to parse account status response")
 }
 
 fn put_vault_metadata_request(

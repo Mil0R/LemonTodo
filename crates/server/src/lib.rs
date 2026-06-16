@@ -13,9 +13,9 @@ use argon2::{
 use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use chrono::{DateTime, Utc};
 use lemontodo_sync::{
-    AcceptedSyncObject, EncryptedSyncObject, LoginRequest, LoginResponse, LogoutRequest,
-    LogoutResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse,
-    PutVaultMetadataRequest, RegisterRequest, RegisterResponse, RejectedSyncObject,
+    AcceptedSyncObject, AccountStatusResponse, EncryptedSyncObject, LoginRequest, LoginResponse,
+    LogoutRequest, LogoutResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest,
+    PushResponse, PutVaultMetadataRequest, RegisterRequest, RegisterResponse, RejectedSyncObject,
     RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo, VaultMetadataResponse,
 };
 use rand::rngs::OsRng;
@@ -222,6 +222,26 @@ impl ServerStore {
             .with_context(|| "invalid access token".to_owned())?;
         self.find_user_by_id(session.user_id)?
             .with_context(|| format!("session user does not exist: {}", session.user_id))
+    }
+
+    pub fn authenticate_with_session(
+        &mut self,
+        access_token: &str,
+    ) -> Result<(UserAccount, UserSession)> {
+        let mut session = self
+            .find_session(access_token)?
+            .with_context(|| "invalid access token".to_owned())?;
+        session.last_used_at = Utc::now();
+        self.conn
+            .execute(
+                "UPDATE user_sessions SET last_used_at = ?1 WHERE token = ?2",
+                params![session.last_used_at.to_rfc3339(), session.token],
+            )
+            .context("failed to update session activity")?;
+        let user = self
+            .find_user_by_id(session.user_id)?
+            .with_context(|| format!("session user does not exist: {}", session.user_id))?;
+        Ok((user, session))
     }
 
     pub fn revoke_session(&mut self, access_token: &str) -> Result<bool> {
@@ -483,6 +503,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/account/login", axum::routing::post(account_login))
         .route("/v1/account/logout", axum::routing::post(account_logout))
+        .route("/v1/account/me", get(account_me))
         .route("/v1/account/vault-key", get(account_get_vault_key))
         .route(
             "/v1/account/vault-key",
@@ -598,6 +619,34 @@ async fn account_logout(
     Ok(Json(LogoutResponse { revoked }))
 }
 
+async fn account_me(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<AccountStatusResponse>, (StatusCode, String)> {
+    let access_token = query
+        .get("access_token")
+        .map(String::as_str)
+        .ok_or((StatusCode::BAD_REQUEST, "missing access_token".to_owned()))?;
+    let mut store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    let (user, session) = store
+        .authenticate_with_session(access_token)
+        .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
+    Ok(Json(AccountStatusResponse {
+        user_id: user.id,
+        email: user.email,
+        is_admin: user.is_admin,
+        has_vault_key: user.encrypted_vault_key_json.is_some(),
+        user_created_at: user.created_at,
+        session_created_at: session.created_at,
+        session_last_used_at: session.last_used_at,
+    }))
+}
+
 async fn account_get_vault_key(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -606,14 +655,14 @@ async fn account_get_vault_key(
         .get("access_token")
         .map(String::as_str)
         .ok_or((StatusCode::BAD_REQUEST, "missing access_token".to_owned()))?;
-    let store = state.store.lock().map_err(|_| {
+    let mut store = state.store.lock().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "store lock poisoned".to_owned(),
         )
     })?;
-    let user = store
-        .authenticate(access_token)
+    let (user, _) = store
+        .authenticate_with_session(access_token)
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     let encrypted_vault_key = user
         .encrypted_vault_key_json
@@ -642,8 +691,8 @@ async fn account_put_vault_key(
             "store lock poisoned".to_owned(),
         )
     })?;
-    let user = store
-        .authenticate(&request.access_token)
+    let (user, _) = store
+        .authenticate_with_session(&request.access_token)
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     let json = serde_json::to_string(&request.encrypted_vault_key).map_err(|error| {
         (
@@ -670,8 +719,8 @@ async fn sync_push(
             "store lock poisoned".to_owned(),
         )
     })?;
-    let user = store
-        .authenticate(&request.access_token)
+    let (user, _) = store
+        .authenticate_with_session(&request.access_token)
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     store
         .push(user.id, request)
@@ -683,14 +732,14 @@ async fn sync_pull(
     State(state): State<AppState>,
     Json(request): Json<PullRequest>,
 ) -> Result<Json<PullResponse>, (StatusCode, String)> {
-    let store = state.store.lock().map_err(|_| {
+    let mut store = state.store.lock().map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "store lock poisoned".to_owned(),
         )
     })?;
-    let user = store
-        .authenticate(&request.access_token)
+    let (user, _) = store
+        .authenticate_with_session(&request.access_token)
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
     store
         .pull(user.id, request)
@@ -869,7 +918,7 @@ fn row_to_user_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserSession>
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, thread, time::Duration};
 
     use lemontodo_crypto::{CryptoEnvelope, KdfParams, VaultKey, wrap_vault_key};
     use lemontodo_sync::{
@@ -1140,6 +1189,56 @@ mod tests {
             .unwrap();
         assert!(downloaded.has_vault_key);
         assert_eq!(downloaded.encrypted_vault_key, Some(encrypted_vault_key));
+    }
+
+    #[tokio::test]
+    async fn account_me_reports_user_and_updates_session_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(login) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let initial_session = {
+            let store = state.store.lock().unwrap();
+            store.find_session(&login.access_token).unwrap().unwrap()
+        };
+        thread::sleep(Duration::from_millis(10));
+
+        let mut query = HashMap::new();
+        query.insert("access_token".to_owned(), login.access_token.clone());
+        let Json(status) = account_me(State(state.clone()), axum::extract::Query(query))
+            .await
+            .unwrap();
+
+        assert_eq!(status.email, "user@example.com");
+        assert!(!status.is_admin);
+        assert!(!status.has_vault_key);
+        assert_eq!(status.session_created_at, initial_session.created_at);
+        assert!(status.session_last_used_at > initial_session.last_used_at);
+
+        let refreshed_session = {
+            let store = state.store.lock().unwrap();
+            store.find_session(&login.access_token).unwrap().unwrap()
+        };
+        assert_eq!(refreshed_session.last_used_at, status.session_last_used_at);
     }
 
     #[test]
