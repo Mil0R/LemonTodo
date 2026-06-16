@@ -193,6 +193,8 @@ ltd sync login --email you@example.com
 ltd sync connect --email you@example.com
 ltd sync connect --email you@example.com --pull
 ltd sync connect --email you@example.com --pull --apply-safe
+ltd sync now
+ltd sync now --apply-safe
 ltd sync whoami
 ltd sync sessions
 ltd sync revoke <session-id-prefix>
@@ -326,10 +328,18 @@ ltd sync apply
 ltd sync pull --json
 ```
 
+Run one manual sync pass for daily use:
+
+```bash
+ltd sync now
+ltd sync now --apply-safe
+```
+
 `ltd sync inbox` shows each pending remote operation with apply status, remote/local revision, local pending-op count, and skip/conflict reason when available.
 `ltd sync conflicts` narrows the inbox to pending remote conflicts that need manual handling and shows the same revision context.
 `ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
+`ltd sync now` pulls and saves remote operations first, optionally applies safe operations with `--apply-safe`, and then pushes local pending operations. Pulling first avoids advancing the local cursor past remote changes that this device has not seen yet.
 `ltd sync status` shows the configured server account email, whether an access token is stored locally, whether local vault metadata exists, and when possible also fetches the current remote account/session view from the server.
 `ltd sync whoami` calls the server with the stored access token and shows which account and session the server currently sees, including whether encrypted vault metadata exists remotely and which device metadata is attached to that session.
 `ltd sync sessions` lists active sessions/devices for the current account and marks the current session.

@@ -260,6 +260,23 @@ enum SyncCommand {
         #[arg(long)]
         no_save: bool,
     },
+    /// Pull remote changes, optionally apply safe ones, then push local changes.
+    Now {
+        #[arg(long)]
+        key: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        master_password: Option<String>,
+        /// Override the configured server URL for this sync run.
+        #[arg(long)]
+        server_url: Option<String>,
+        /// Maximum number of encrypted objects to fetch before pushing.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        /// Apply safe pulled remote operations before pushing local changes.
+        #[arg(long)]
+        apply_safe: bool,
+    },
     /// Upload local encrypted vault metadata to the server account.
     VaultPush,
     /// Download encrypted vault metadata from the server account.
@@ -742,6 +759,39 @@ fn main() -> Result<()> {
                     }
                 }
             }
+            SyncCommand::Now {
+                key,
+                master_password,
+                server_url,
+                limit,
+                apply_safe,
+            } => {
+                let summary = sync_now(
+                    &store,
+                    key.as_deref(),
+                    master_password,
+                    server_url.as_deref(),
+                    limit,
+                    apply_safe,
+                )?;
+                println!(
+                    "Pulled {} object(s), saved {}, cursor {}, has_more {}",
+                    summary.pulled.operations.len(),
+                    summary.saved,
+                    summary.pulled.cursor,
+                    summary.pulled.has_more
+                );
+                if let Some(applied) = summary.applied {
+                    println!(
+                        "Applied {}, skipped {}, conflicts {}",
+                        applied.applied, applied.skipped, applied.conflicts
+                    );
+                }
+                println!(
+                    "Pushed {} accepted, {} rejected, cursor {}",
+                    summary.pushed.accepted, summary.pushed.rejected, summary.pushed.cursor
+                );
+            }
             SyncCommand::VaultPush => {
                 push_vault_metadata(&store)?;
                 println!("Uploaded encrypted vault metadata");
@@ -876,6 +926,13 @@ struct PullSummary {
     has_more: bool,
 }
 
+struct SyncNowSummary {
+    pulled: PullSummary,
+    saved: usize,
+    applied: Option<lemontodo_storage::RemoteApplySummary>,
+    pushed: PushSummary,
+}
+
 struct DeviceConnectSummary {
     email: String,
     pulled: Option<ConnectPullSummary>,
@@ -909,6 +966,14 @@ fn push_pending_operations(
 ) -> Result<PushSummary> {
     let server_url = configured_server_url(store, server_url)?;
     let vault_key = load_vault_key(store, key, master_password)?;
+    push_pending_operations_with_vault_key(store, &vault_key, &server_url)
+}
+
+fn push_pending_operations_with_vault_key(
+    store: &TodoStore,
+    vault_key: &VaultKey,
+    server_url: &str,
+) -> Result<PushSummary> {
     let operations = store.pending_operations()?;
     if operations.is_empty() {
         let cursor = store
@@ -925,13 +990,13 @@ fn push_pending_operations(
         .iter()
         .map(|operation| operation.id)
         .collect::<Vec<_>>();
-    let pack = pack_operations(&vault_key, store.device_id()?, &operations)?;
+    let pack = pack_operations(vault_key, store.device_id()?, &operations)?;
     let request = PushRequest::from_pack(
         configured_access_token(store)?,
         store.last_sync_cursor()?,
         pack,
     );
-    let response = post_push_request(&server_url, &request)?;
+    let response = post_push_request(server_url, &request)?;
     let accepted_ids = response
         .accepted
         .iter()
@@ -959,6 +1024,15 @@ fn pull_remote_operations(
 ) -> Result<PullSummary> {
     let server_url = configured_server_url(store, server_url)?;
     let vault_key = load_vault_key(store, key, master_password)?;
+    pull_remote_operations_with_vault_key(store, &vault_key, &server_url, limit)
+}
+
+fn pull_remote_operations_with_vault_key(
+    store: &TodoStore,
+    vault_key: &VaultKey,
+    server_url: &str,
+    limit: u32,
+) -> Result<PullSummary> {
     let request = PullRequest {
         protocol_version: PROTOCOL_VERSION,
         device_id: store.device_id()?,
@@ -966,17 +1040,44 @@ fn pull_remote_operations(
         cursor: store.last_sync_cursor()?,
         limit,
     };
-    let response = post_pull_request(&server_url, &request)?;
+    let response = post_pull_request(server_url, &request)?;
     let operations = response
         .objects
         .iter()
-        .map(|object| unpack_operation(&vault_key, object))
+        .map(|object| unpack_operation(vault_key, object))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(PullSummary {
         operations,
         cursor: response.cursor,
         has_more: response.has_more,
+    })
+}
+
+fn sync_now(
+    store: &TodoStore,
+    key: Option<&str>,
+    master_password: Option<String>,
+    server_url: Option<&str>,
+    limit: u32,
+    apply_safe: bool,
+) -> Result<SyncNowSummary> {
+    let server_url = configured_server_url(store, server_url)?;
+    let vault_key = load_vault_key(store, key, master_password)?;
+    let pulled = pull_remote_operations_with_vault_key(store, &vault_key, &server_url, limit)?;
+    let saved = store.save_remote_operations(&pulled.operations, &pulled.cursor)?;
+    let applied = if apply_safe {
+        Some(store.apply_pending_remote_operations()?)
+    } else {
+        None
+    };
+    let pushed = push_pending_operations_with_vault_key(store, &vault_key, &server_url)?;
+
+    Ok(SyncNowSummary {
+        pulled,
+        saved,
+        applied,
+        pushed,
     })
 }
 
