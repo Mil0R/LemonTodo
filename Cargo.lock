@@ -1045,6 +1045,7 @@ dependencies = [
  "lemontodo-crypto",
  "lemontodo-sync",
  "serde_json",
+ "uuid",
  "wasm-bindgen",
 ]
 

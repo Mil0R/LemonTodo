@@ -122,19 +122,23 @@ const REGISTER_HTML: &str = r##"<!doctype html>
     <div id="status" role="status"></div>
   </main>
   <script type="module">
-    import init, { build_register_request } from "/register/register_wasm.js";
-
     const form = document.querySelector("#register-form");
     const submit = document.querySelector("#submit");
     const status = document.querySelector("#status");
     let wasmReady = false;
+    let buildRegisterRequest;
 
     function setStatus(message) {
       status.textContent = message;
     }
 
     try {
-      await init("/register/register_wasm_bg.wasm");
+      const wasm = await import("/register/register_wasm.js");
+      await wasm.default("/register/register_wasm_bg.wasm");
+      if (typeof wasm.build_register_request !== "function") {
+        throw new Error("registration bundle is outdated");
+      }
+      buildRegisterRequest = wasm.build_register_request;
       wasmReady = true;
     } catch (error) {
       setStatus("Registration assets are not built on this server. Run ./scripts/build-register-wasm.sh.");
@@ -157,19 +161,209 @@ const REGISTER_HTML: &str = r##"<!doctype html>
       submit.disabled = true;
       setStatus("Creating account...");
       try {
-        const body = build_register_request(email, masterPassword);
+        const body = buildRegisterRequest(email, masterPassword);
         const response = await fetch("/v1/account/register", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body
         });
         if (!response.ok) {
-          throw new Error(await response.text());
+          const message = await response.text();
+          if (message.includes("already exists")) {
+            throw new Error("Account already exists.");
+          }
+          throw new Error(message || "Registration failed.");
         }
-        setStatus("Account created. You can now log in from ltd.");
-        form.reset();
+        window.location.assign("/?registered=1");
       } catch (error) {
         setStatus(error.message || "Registration failed.");
+      } finally {
+        submit.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
+"##;
+const LOGIN_HTML_TEMPLATE: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LemonTodo Login</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --line: color-mix(in srgb, CanvasText 18%, transparent);
+      --muted: color-mix(in srgb, CanvasText 58%, transparent);
+      --accent: #d6ff57;
+      font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", "Liberation Mono", monospace;
+      background: Canvas;
+      color: CanvasText;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background:
+        linear-gradient(var(--line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--line) 1px, transparent 1px),
+        Canvas;
+      background-size: 36px 36px;
+    }
+    main {
+      width: min(440px, 100%);
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+      padding: 28px;
+      box-shadow: 10px 10px 0 color-mix(in srgb, CanvasText 12%, transparent);
+    }
+    .kicker {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0 0 22px;
+      font-size: 28px;
+      line-height: 1.05;
+      letter-spacing: -0.04em;
+    }
+    form {
+      display: grid;
+      gap: 14px;
+    }
+    label {
+      display: grid;
+      gap: 7px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    input, button {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 0;
+      padding: 9px 10px;
+      font: inherit;
+      background: Canvas;
+      color: CanvasText;
+    }
+    input:focus-visible, button:focus-visible, a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    button {
+      cursor: pointer;
+      margin-top: 4px;
+      background: CanvasText;
+      color: Canvas;
+      border-color: CanvasText;
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.62;
+    }
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    a {
+      color: CanvasText;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    #status {
+      min-height: 21px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="kicker">self-hosted auth check</p>
+    <h1>LemonTodo Login</h1>
+    <form id="login-form">
+      <label>
+        Email
+        <input id="email" name="email" type="email" autocomplete="username" required autofocus>
+      </label>
+      <label>
+        Master password
+        <input id="master-password" name="master-password" type="password" autocomplete="current-password" required>
+      </label>
+      <button id="submit" type="submit">Log in</button>
+    </form>
+    <div id="status" role="status"></div>
+    <div class="footer">
+      <span>Server identity is local to this host.</span>
+      __REGISTER_LINK__
+    </div>
+  </main>
+  <script type="module">
+    const form = document.querySelector("#login-form");
+    const submit = document.querySelector("#submit");
+    const status = document.querySelector("#status");
+    let wasmReady = false;
+    let buildLoginRequest;
+
+    function setStatus(message) {
+      status.textContent = message;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("registered") === "1") {
+      setStatus("Account created. Log in to continue.");
+    }
+
+    try {
+      const wasm = await import("/register/register_wasm.js");
+      await wasm.default("/register/register_wasm_bg.wasm");
+      if (typeof wasm.build_login_request !== "function") {
+        throw new Error("login bundle is outdated");
+      }
+      buildLoginRequest = wasm.build_login_request;
+      wasmReady = true;
+    } catch (error) {
+      setStatus("Login assets are not built on this server. Run ./scripts/build-register-wasm.sh.");
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!wasmReady) {
+        return;
+      }
+
+      submit.disabled = true;
+      setStatus("Checking credentials...");
+      try {
+        const email = document.querySelector("#email").value.trim();
+        const masterPassword = document.querySelector("#master-password").value;
+        const body = buildLoginRequest(email, masterPassword, "browser");
+        const response = await fetch("/v1/account/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body
+        });
+        if (!response.ok) {
+          throw new Error(await response.text() || "Login failed.");
+        }
+        const session = await response.json();
+        sessionStorage.setItem("lemontodo_console_token", session.access_token);
+        window.location.assign(`/console?access_token=${encodeURIComponent(session.access_token)}`);
+      } catch (error) {
+        setStatus(error.message || "Login failed.");
       } finally {
         submit.disabled = false;
       }
@@ -836,6 +1030,8 @@ pub struct HealthResponse {
 
 pub fn app(state: AppState) -> Router {
     Router::new()
+        .route("/", get(login_page))
+        .route("/console", get(console_page))
         .route("/healthz", get(healthz))
         .route("/register", get(register_page))
         .route("/register/register_wasm.js", get(register_wasm_js))
@@ -877,12 +1073,171 @@ async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+async fn login_page(State(state): State<AppState>) -> Html<String> {
+    Html(login_html(state.config.allow_registration))
+}
+
+async fn console_page(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Html<String> {
+    let Some(access_token) = query.get("access_token") else {
+        return Html(console_error_html("Missing session. Return to login."));
+    };
+    let account = {
+        let mut store = match state.store.lock() {
+            Ok(store) => store,
+            Err(_) => return Html(console_error_html("Store lock failed.")),
+        };
+        store.authenticate(access_token, session_ttl(&state.config))
+    };
+    match account {
+        Ok(user) => Html(console_html(&user.email)),
+        Err(_) => Html(console_error_html(
+            "Session expired or invalid. Return to login.",
+        )),
+    }
+}
+
 async fn register_page(State(state): State<AppState>) -> Html<&'static str> {
     if state.config.allow_registration {
         Html(REGISTER_HTML)
     } else {
         Html(REGISTRATION_DISABLED_HTML)
     }
+}
+
+fn login_html(allow_registration: bool) -> String {
+    let register_link = if allow_registration {
+        r#"<a href="/register">Create account</a>"#
+    } else {
+        ""
+    };
+    LOGIN_HTML_TEMPLATE.replace("__REGISTER_LINK__", register_link)
+}
+
+fn console_html(email: &str) -> String {
+    let escaped_email = escape_html(email);
+    format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LemonTodo Console</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      --line: color-mix(in srgb, CanvasText 18%, transparent);
+      --muted: color-mix(in srgb, CanvasText 58%, transparent);
+      --accent: #d6ff57;
+      font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", "Liberation Mono", monospace;
+      background: Canvas;
+      color: CanvasText;
+    }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background:
+        linear-gradient(var(--line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--line) 1px, transparent 1px),
+        Canvas;
+      background-size: 36px 36px;
+    }}
+    main {{
+      width: min(520px, 100%);
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+      padding: 28px;
+      box-shadow: 10px 10px 0 color-mix(in srgb, CanvasText 12%, transparent);
+    }}
+    .kicker {{
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }}
+    h1 {{
+      margin: 0 0 22px;
+      font-size: 28px;
+      line-height: 1.05;
+      letter-spacing: -0.04em;
+    }}
+    dl {{
+      display: grid;
+      grid-template-columns: 100px 1fr;
+      gap: 10px 14px;
+      margin: 0 0 20px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }}
+    dt {{
+      color: var(--muted);
+    }}
+    dd {{
+      margin: 0;
+      overflow-wrap: anywhere;
+    }}
+    a {{
+      color: CanvasText;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }}
+    a:focus-visible {{
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <p class="kicker">console</p>
+    <h1>Signed in</h1>
+    <dl>
+      <dt>Account</dt>
+      <dd>{escaped_email}</dd>
+    </dl>
+    <a href="/">Back to login</a>
+  </main>
+</body>
+</html>
+"##
+    )
+}
+
+fn console_error_html(message: &str) -> String {
+    let escaped_message = escape_html(message);
+    format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LemonTodo Console</title>
+</head>
+<body>
+  <main>
+    <h1>Console unavailable</h1>
+    <p>{escaped_message}</p>
+    <a href="/">Back to login</a>
+  </main>
+</body>
+</html>
+"##
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 async fn register_wasm_js(
@@ -1506,6 +1861,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_page_renders_registration_link_when_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+
+        let Html(page) = login_page(State(state)).await;
+
+        assert!(page.contains("LemonTodo Login"));
+        assert!(page.contains(r#"<a href="/register">Create account</a>"#));
+    }
+
+    #[tokio::test]
+    async fn login_page_hides_registration_link_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::open(test_server_config(dir.path().join("server.db"))).unwrap();
+
+        let Html(page) = login_page(State(state)).await;
+
+        assert!(page.contains("LemonTodo Login"));
+        assert!(!page.contains(r#"<a href="/register">Create account</a>"#));
+    }
+
+    #[tokio::test]
     async fn server_info_handler_reports_protocol() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::open(test_server_config(dir.path().join("server.db"))).unwrap();
@@ -1599,6 +1978,37 @@ mod tests {
 
         assert_eq!(response.email, "user@example.com");
         assert!(!response.access_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn console_page_displays_authenticated_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(register_request("user@example.com")),
+        )
+        .await
+        .unwrap();
+        let Json(login) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "test-device".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let query = HashMap::from([("access_token".to_owned(), login.access_token)]);
+
+        let Html(page) = console_page(State(state), axum::extract::Query(query)).await;
+
+        assert!(page.contains("Signed in"));
+        assert!(page.contains("user@example.com"));
     }
 
     #[tokio::test]

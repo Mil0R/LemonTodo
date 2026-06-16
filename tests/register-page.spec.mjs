@@ -12,7 +12,14 @@ test("register page creates an E2EE account usable by ltd login", async ({ page 
   await page.getByLabel("Master password", { exact: true }).fill(masterPassword);
   await page.getByLabel("Confirm master password").fill(masterPassword);
   await page.getByRole("button", { name: "Create account" }).click();
+  await page.waitForURL(`${serverUrl}/?registered=1`);
   await expect(page.getByRole("status")).toContainText("Account created");
+
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Master password").fill(masterPassword);
+  await page.getByRole("button", { name: "Log in" }).click();
+  await page.waitForURL(/\/console\?access_token=/);
+  await expect(page.getByText(email)).toBeVisible();
 
   execFileSync(
     "cargo",

@@ -15,4 +15,5 @@ getrandom = { version = "0.2", features = ["js"] }
 lemontodo-crypto = { path = "../crypto" }
 lemontodo-sync = { path = "../sync" }
 serde_json.workspace = true
+uuid.workspace = true
 wasm-bindgen.workspace = true

@@ -84,12 +84,14 @@ npm install
 ./scripts/e2e-register-page.sh
 ```
 
-This builds the registration WASM bundle, starts a temporary local server, registers through `/register` in Playwright, and verifies that `ltd login` can use the created account. If `wasm-bindgen` CLI or the `wasm32-unknown-unknown` target is missing, the script exits successfully with a skip message.
+This builds the registration WASM bundle, starts a temporary local server, registers through `/register` in Playwright, verifies browser login through `/`, and verifies that `ltd login` can use the created account. If `wasm-bindgen` CLI or the `wasm32-unknown-unknown` target is missing, the script exits successfully with a skip message.
 
 Available server endpoints:
 
 ```text
 GET /healthz
+GET /
+GET /console
 GET /register
 GET /register/register_wasm.js
 GET /register/register_wasm_bg.wasm
@@ -119,7 +121,7 @@ LEMONTODO_ADMIN_PASSWORD=
 LEMONTODO_REGISTER_WASM_DIR=target/register-wasm
 ```
 
-Build the browser-side registration WASM bundle before using `/register`:
+Build the browser-side account WASM bundle before using `/register` or `/`:
 
 ```bash
 cargo install wasm-bindgen-cli
@@ -127,7 +129,7 @@ cargo install wasm-bindgen-cli
 LEMONTODO_ALLOW_REGISTRATION=true cargo run -p lemontodo-server
 ```
 
-If `rustup` is available, the script installs the `wasm32-unknown-unknown` target automatically. Otherwise install that target through your Rust toolchain manager first. The registration page derives the server auth hash and encrypted vault metadata in the browser before calling `/v1/account/register`; the master password is not posted to the server.
+If `rustup` is available, the script installs the `wasm32-unknown-unknown` target automatically. Otherwise install that target through your Rust toolchain manager first. The registration page derives the server auth hash and encrypted vault metadata in the browser before calling `/v1/account/register`; the login page derives the server auth hash in the browser before calling `/v1/account/login`. The master password is not posted to the server.
 
 ## Install Locally
 
