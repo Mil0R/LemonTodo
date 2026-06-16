@@ -16,8 +16,8 @@ use lemontodo_sync::{
     AcceptedSyncObject, AccountStatusResponse, EncryptedSyncObject, LoginRequest, LoginResponse,
     LogoutRequest, LogoutResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest,
     PushResponse, PutVaultMetadataRequest, RegisterRequest, RegisterResponse, RejectedSyncObject,
-    RejectionReason, ServerAuthInfo, ServerCapability, ServerInfo, SessionInfo, SessionsResponse,
-    VaultMetadataResponse,
+    RejectionReason, RevokeSessionRequest, RevokeSessionResponse, ServerAuthInfo, ServerCapability,
+    ServerInfo, SessionInfo, SessionsResponse, VaultMetadataResponse,
 };
 use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -336,6 +336,50 @@ impl ServerStore {
         Ok(sessions)
     }
 
+    pub fn revoke_session_for_user(
+        &mut self,
+        user_id: Uuid,
+        current_token: &str,
+        session_id_prefix: &str,
+    ) -> Result<(bool, bool, String)> {
+        let session_id_prefix = session_id_prefix.trim();
+        if session_id_prefix.is_empty() {
+            anyhow::bail!("session id cannot be empty");
+        }
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT token, user_id, created_at, last_used_at, device_id, device_name
+                 FROM user_sessions
+                 WHERE user_id = ?1 AND token LIKE ?2",
+            )
+            .context("failed to prepare session revoke query")?;
+        let matches = stmt
+            .query_map(
+                params![user_id.to_string(), format!("{session_id_prefix}%")],
+                row_to_user_session,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to query session revoke candidates")?;
+        match matches.as_slice() {
+            [] => anyhow::bail!("session not found: {session_id_prefix}"),
+            [_first, _second, ..] => anyhow::bail!("session id is ambiguous: {session_id_prefix}"),
+            [session] => {
+                let current = session.token == current_token;
+                let session_id = token_prefix(&session.token);
+                let revoked = self
+                    .conn
+                    .execute(
+                        "DELETE FROM user_sessions WHERE token = ?1 AND user_id = ?2",
+                        params![session.token, user_id.to_string()],
+                    )
+                    .context("failed to revoke session")?
+                    > 0;
+                Ok((revoked, current, session_id))
+            }
+        }
+    }
+
     pub fn set_encrypted_vault_key(
         &mut self,
         user_id: Uuid,
@@ -590,6 +634,10 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/account/logout", axum::routing::post(account_logout))
         .route("/v1/account/me", get(account_me))
         .route("/v1/account/sessions", get(account_sessions))
+        .route(
+            "/v1/account/sessions/revoke",
+            axum::routing::post(account_revoke_session),
+        )
         .route("/v1/account/vault-key", get(account_get_vault_key))
         .route(
             "/v1/account/vault-key",
@@ -756,6 +804,40 @@ async fn account_sessions(
         .active_sessions(user.id, access_token, session_ttl(&state.config))
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     Ok(Json(SessionsResponse { sessions }))
+}
+
+async fn account_revoke_session(
+    State(state): State<AppState>,
+    Json(request): Json<RevokeSessionRequest>,
+) -> Result<Json<RevokeSessionResponse>, (StatusCode, String)> {
+    let mut store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_owned(),
+        )
+    })?;
+    let (user, _) = store
+        .authenticate_with_session(&request.access_token, session_ttl(&state.config))
+        .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
+    let (revoked, current, session_id) = store
+        .revoke_session_for_user(user.id, &request.access_token, &request.session_id)
+        .map_err(|error| {
+            let message = error.to_string();
+            let status = if message.contains("not found")
+                || message.contains("ambiguous")
+                || message.contains("cannot be empty")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, message)
+        })?;
+    Ok(Json(RevokeSessionResponse {
+        revoked,
+        current,
+        session_id,
+    }))
 }
 
 async fn account_get_vault_key(
@@ -1507,6 +1589,174 @@ mod tests {
         assert!(!other.current);
         assert_eq!(other.device_id, Some(first_device_id));
         assert_eq!(other.device_name.as_deref(), Some("laptop"));
+    }
+
+    #[tokio::test]
+    async fn account_revoke_session_removes_selected_user_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(first) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "laptop".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(second) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "desktop".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(response) = account_revoke_session(
+            State(state.clone()),
+            Json(RevokeSessionRequest {
+                access_token: second.access_token.clone(),
+                session_id: token_prefix(&first.access_token),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.revoked);
+        assert!(!response.current);
+        assert_eq!(response.session_id, token_prefix(&first.access_token));
+        let store = state.store.lock().unwrap();
+        assert!(store.find_session(&first.access_token).unwrap().is_none());
+        assert!(store.find_session(&second.access_token).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn account_revoke_session_reports_current_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(login) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "laptop".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let Json(response) = account_revoke_session(
+            State(state.clone()),
+            Json(RevokeSessionRequest {
+                access_token: login.access_token.clone(),
+                session_id: token_prefix(&login.access_token),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.revoked);
+        assert!(response.current);
+        assert_eq!(response.session_id, token_prefix(&login.access_token));
+        let store = state.store.lock().unwrap();
+        assert!(store.find_session(&login.access_token).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn account_revoke_session_rejects_other_users_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        let state = AppState::open(config).unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = account_register(
+            State(state.clone()),
+            Json(RegisterRequest {
+                email: "other@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(user_login) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "user@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "laptop".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(other_login) = account_login(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "other@example.com".to_owned(),
+                password: "dev-password".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "desktop".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let error = account_revoke_session(
+            State(state.clone()),
+            Json(RevokeSessionRequest {
+                access_token: user_login.access_token,
+                session_id: token_prefix(&other_login.access_token),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("session not found"));
+        let store = state.store.lock().unwrap();
+        assert!(
+            store
+                .find_session(&other_login.access_token)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

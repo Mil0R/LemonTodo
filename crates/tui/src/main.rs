@@ -17,8 +17,9 @@ use lemontodo_storage::{RemoteOperation, TodoStore};
 use lemontodo_sync::{
     AccountStatusResponse, LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
     PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse,
-    PutVaultMetadataRequest, RegisterRequest, RegisterResponse, SessionsResponse,
-    VaultMetadataResponse, pack_operations, unpack_operation,
+    PutVaultMetadataRequest, RegisterRequest, RegisterResponse, RevokeSessionRequest,
+    RevokeSessionResponse, SessionsResponse, VaultMetadataResponse, pack_operations,
+    unpack_operation,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -202,6 +203,13 @@ enum SyncCommand {
         /// Print the server response as pretty JSON.
         #[arg(long)]
         json: bool,
+        /// Override the configured server URL for this request.
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Revoke an active server session by id prefix from `ltd sync sessions`.
+    Revoke {
+        session: String,
         /// Override the configured server URL for this request.
         #[arg(long)]
         server_url: Option<String>,
@@ -620,6 +628,24 @@ fn main() -> Result<()> {
                 } else {
                     print_sessions(&sessions);
                 }
+            }
+            SyncCommand::Revoke {
+                session,
+                server_url,
+            } => {
+                let response = revoke_session_by_prefix(&store, server_url.as_deref(), &session)?;
+                if response.current {
+                    store.clear_sync_access_token()?;
+                }
+                println!(
+                    "Revoked session {}{}",
+                    response.session_id,
+                    if response.current {
+                        " and cleared local token"
+                    } else {
+                        ""
+                    }
+                );
             }
             SyncCommand::Keygen => {
                 println!("{}", VaultKey::generate().to_hex());
@@ -1090,6 +1116,22 @@ fn fetch_sessions(store: &TodoStore, server_url: Option<&str>) -> Result<Session
     get_sessions_request(&server_url, &access_token)
 }
 
+fn revoke_session_by_prefix(
+    store: &TodoStore,
+    server_url: Option<&str>,
+    session_id: &str,
+) -> Result<RevokeSessionResponse> {
+    let server_url = configured_server_url(store, server_url)?;
+    let access_token = configured_access_token(store)?;
+    post_revoke_session_request(
+        &server_url,
+        &RevokeSessionRequest {
+            access_token,
+            session_id: session_id.to_owned(),
+        },
+    )
+}
+
 fn print_remote_account_status(status: &AccountStatusResponse) {
     println!("Remote user {}", status.email);
     println!("Remote user id {}", status.user_id);
@@ -1271,6 +1313,19 @@ fn post_logout_request(server_url: &str, request: &LogoutRequest) -> Result<Logo
     let endpoint = format!("{server_url}/v1/account/logout");
     let response = checked_response(&endpoint, http_agent().post(&endpoint).send_json(request))?;
     checked_json_response(&endpoint, response, "failed to parse logout response")
+}
+
+fn post_revoke_session_request(
+    server_url: &str,
+    request: &RevokeSessionRequest,
+) -> Result<RevokeSessionResponse> {
+    let endpoint = format!("{server_url}/v1/account/sessions/revoke");
+    let response = checked_response(&endpoint, http_agent().post(&endpoint).send_json(request))?;
+    checked_json_response(
+        &endpoint,
+        response,
+        "failed to parse revoke session response",
+    )
 }
 
 fn get_account_status_request(

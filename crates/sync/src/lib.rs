@@ -214,6 +214,19 @@ pub struct SessionsResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeSessionRequest {
+    pub access_token: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeSessionResponse {
+    pub revoked: bool,
+    pub current: bool,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutVaultMetadataRequest {
     pub access_token: String,
     pub encrypted_vault_key: EncryptedVaultKey,
@@ -437,5 +450,23 @@ mod tests {
         assert_eq!(json["sessions"][0]["current"], true);
         assert_eq!(json["sessions"][0]["device_id"], Uuid::nil().to_string());
         assert_eq!(json["sessions"][0]["device_name"], "workstation");
+
+        let revoke = RevokeSessionRequest {
+            access_token: "token-3".to_owned(),
+            session_id: "abc12345".to_owned(),
+        };
+        let json = serde_json::to_value(&revoke).unwrap();
+        assert_eq!(json["access_token"], "token-3");
+        assert_eq!(json["session_id"], "abc12345");
+
+        let revoke = RevokeSessionResponse {
+            revoked: true,
+            current: false,
+            session_id: "abc12345".to_owned(),
+        };
+        let json = serde_json::to_value(&revoke).unwrap();
+        assert_eq!(json["revoked"], true);
+        assert_eq!(json["current"], false);
+        assert_eq!(json["session_id"], "abc12345");
     }
 }
