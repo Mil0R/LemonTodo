@@ -1,0 +1,24 @@
+{
+  "name": "lemontodo-e2e",
+  "version": "0.1.0",
+  "description": "LemonTodo is a developer-first, local-first, end-to-end encrypted Todo application.",
+  "private": true,
+  "scripts": {
+    "e2e:register": "playwright test tests/register-page.spec.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mil0R/LemonTodo.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "GPL-3.0-only OR AGPL-3.0-only",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/Mil0R/LemonTodo/issues"
+  },
+  "homepage": "https://github.com/Mil0R/LemonTodo#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
+  }
+}

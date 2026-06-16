@@ -77,6 +77,15 @@ Run the local end-to-end client/server test:
 
 The script starts a temporary local server, provisions two client databases under `/tmp/lemontodo-e2e-local`, verifies first-device bootstrap, second-device connect, bidirectional sync, remote conflict inbox behavior, and session visibility, then stops the server automatically.
 
+Run the browser registration page end-to-end test when the WASM toolchain is available:
+
+```bash
+npm install
+./scripts/e2e-register-page.sh
+```
+
+This builds the registration WASM bundle, starts a temporary local server, registers through `/register` in Playwright, and verifies that `ltd sync login` can use the created account. If `wasm-bindgen` CLI or the `wasm32-unknown-unknown` target is missing, the script exits successfully with a skip message.
+
 Available server endpoints:
 
 ```text
