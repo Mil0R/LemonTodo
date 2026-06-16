@@ -10,7 +10,14 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::State,
+    http::{Response, StatusCode, header},
+    response::Html,
+    routing::get,
+};
 use chrono::{DateTime, Duration, Utc};
 use lemontodo_sync::{
     AcceptedSyncObject, AccountStatusResponse, EncryptedSyncObject, LoginRequest, LoginResponse,
@@ -27,6 +34,164 @@ use uuid::Uuid;
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
+const DEFAULT_REGISTER_WASM_DIR: &str = "target/register-wasm";
+const REGISTER_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LemonTodo Register</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: Canvas;
+      color: CanvasText;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    main {
+      width: min(420px, 100%);
+      display: grid;
+      gap: 18px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.1;
+    }
+    form {
+      display: grid;
+      gap: 12px;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 14px;
+    }
+    input, button {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid color-mix(in srgb, CanvasText 24%, transparent);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font: inherit;
+      background: Canvas;
+      color: CanvasText;
+    }
+    button {
+      cursor: pointer;
+      background: CanvasText;
+      color: Canvas;
+      border-color: CanvasText;
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
+    #status {
+      min-height: 22px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>LemonTodo Register</h1>
+    <form id="register-form">
+      <label>
+        Email
+        <input id="email" name="email" type="email" autocomplete="username" required>
+      </label>
+      <label>
+        Master password
+        <input id="master-password" name="master-password" type="password" autocomplete="new-password" minlength="8" required>
+      </label>
+      <label>
+        Confirm master password
+        <input id="confirm-password" name="confirm-password" type="password" autocomplete="new-password" minlength="8" required>
+      </label>
+      <button id="submit" type="submit">Create account</button>
+    </form>
+    <div id="status" role="status"></div>
+  </main>
+  <script type="module">
+    import init, { build_register_request } from "/register/register_wasm.js";
+
+    const form = document.querySelector("#register-form");
+    const submit = document.querySelector("#submit");
+    const status = document.querySelector("#status");
+    let wasmReady = false;
+
+    function setStatus(message) {
+      status.textContent = message;
+    }
+
+    try {
+      await init("/register/register_wasm_bg.wasm");
+      wasmReady = true;
+    } catch (error) {
+      setStatus("Registration assets are not built on this server. Run ./scripts/build-register-wasm.sh.");
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!wasmReady) {
+        return;
+      }
+
+      const email = document.querySelector("#email").value.trim();
+      const masterPassword = document.querySelector("#master-password").value;
+      const confirmation = document.querySelector("#confirm-password").value;
+      if (masterPassword !== confirmation) {
+        setStatus("Master passwords do not match.");
+        return;
+      }
+
+      submit.disabled = true;
+      setStatus("Creating account...");
+      try {
+        const body = build_register_request(email, masterPassword);
+        const response = await fetch("/v1/account/register", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body
+        });
+        if (!response.ok) {
+          throw new Error(await response.text());
+        }
+        setStatus("Account created. You can now log in from ltd.");
+        form.reset();
+      } catch (error) {
+        setStatus(error.message || "Registration failed.");
+      } finally {
+        submit.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
+"##;
+const REGISTRATION_DISABLED_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LemonTodo Register</title>
+</head>
+<body>
+  <main>
+    <h1>Registration is disabled</h1>
+  </main>
+</body>
+</html>
+"##;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
@@ -37,6 +202,7 @@ pub struct ServerConfig {
     pub session_ttl_secs: i64,
     pub admin_email: Option<String>,
     pub admin_password: Option<String>,
+    pub register_wasm_dir: PathBuf,
 }
 
 impl ServerConfig {
@@ -76,6 +242,9 @@ impl ServerConfig {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
         let admin_password = lookup("LEMONTODO_ADMIN_PASSWORD").filter(|value| !value.is_empty());
+        let register_wasm_dir = lookup("LEMONTODO_REGISTER_WASM_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_REGISTER_WASM_DIR));
 
         Ok(Self {
             host,
@@ -85,6 +254,7 @@ impl ServerConfig {
             session_ttl_secs,
             admin_email,
             admin_password,
+            register_wasm_dir,
         })
     }
 
@@ -667,6 +837,9 @@ pub struct HealthResponse {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/register", get(register_page))
+        .route("/register/register_wasm.js", get(register_wasm_js))
+        .route("/register/register_wasm_bg.wasm", get(register_wasm_binary))
         .route("/v1/server-info", get(server_info))
         .route(
             "/v1/account/register",
@@ -702,6 +875,56 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 
 async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+async fn register_page(State(state): State<AppState>) -> Html<&'static str> {
+    if state.config.allow_registration {
+        Html(REGISTER_HTML)
+    } else {
+        Html(REGISTRATION_DISABLED_HTML)
+    }
+}
+
+async fn register_wasm_js(
+    State(state): State<AppState>,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    register_asset_response(
+        state.config.register_wasm_dir.join("register_wasm.js"),
+        "text/javascript; charset=utf-8",
+    )
+}
+
+async fn register_wasm_binary(
+    State(state): State<AppState>,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    register_asset_response(
+        state.config.register_wasm_dir.join("register_wasm_bg.wasm"),
+        "application/wasm",
+    )
+}
+
+fn register_asset_response(
+    path: PathBuf,
+    content_type: &'static str,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    let bytes = std::fs::read(&path).map_err(|error| {
+        (
+            StatusCode::NOT_FOUND,
+            format!(
+                "register asset not found at {}; run ./scripts/build-register-wasm.sh ({error})",
+                path.display()
+            ),
+        )
+    })?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(bytes))
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to build asset response: {error}"),
+            )
+        })
 }
 
 async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
@@ -2039,6 +2262,7 @@ mod tests {
             session_ttl_secs: DEFAULT_SESSION_TTL_SECS,
             admin_email: None,
             admin_password: None,
+            register_wasm_dir: PathBuf::from(DEFAULT_REGISTER_WASM_DIR),
         }
     }
 

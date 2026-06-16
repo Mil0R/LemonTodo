@@ -3,6 +3,7 @@ members = [
     "crates/core",
     "crates/crypto",
     "crates/server",
+    "crates/register-wasm",
     "crates/storage",
     "crates/sync",
     "crates/tui",
@@ -38,3 +39,4 @@ tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread"] }
 unicode-width = "0.2"
 ureq = { version = "3.1", features = ["json"] }
 uuid = { version = "1.19", features = ["serde", "v4"] }
+wasm-bindgen = "0.2"

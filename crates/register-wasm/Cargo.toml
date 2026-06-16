@@ -1,0 +1,18 @@
+[package]
+name = "lemontodo-register-wasm"
+version = "0.1.0"
+edition.workspace = true
+license = "AGPL-3.0-only"
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow.workspace = true
+getrandom = { version = "0.2", features = ["js"] }
+lemontodo-crypto = { path = "../crypto" }
+lemontodo-sync = { path = "../sync" }
+serde_json.workspace = true
+wasm-bindgen.workspace = true

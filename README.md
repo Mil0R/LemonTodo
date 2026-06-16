@@ -81,6 +81,9 @@ Available server endpoints:
 
 ```text
 GET /healthz
+GET /register
+GET /register/register_wasm.js
+GET /register/register_wasm_bg.wasm
 GET /v1/server-info
 POST /v1/account/register
 POST /v1/account/login
@@ -104,7 +107,18 @@ LEMONTODO_ALLOW_REGISTRATION=false
 LEMONTODO_SESSION_TTL_SECS=2592000
 LEMONTODO_ADMIN_EMAIL=
 LEMONTODO_ADMIN_PASSWORD=
+LEMONTODO_REGISTER_WASM_DIR=target/register-wasm
 ```
+
+Build the browser-side registration WASM bundle before using `/register`:
+
+```bash
+cargo install wasm-bindgen-cli
+./scripts/build-register-wasm.sh
+LEMONTODO_ALLOW_REGISTRATION=true cargo run -p lemontodo-server
+```
+
+If `rustup` is available, the script installs the `wasm32-unknown-unknown` target automatically. Otherwise install that target through your Rust toolchain manager first. The registration page derives the server auth hash and encrypted vault metadata in the browser before calling `/v1/account/register`; the master password is not posted to the server.
 
 ## Install Locally
 
@@ -281,7 +295,7 @@ The sync crate defines the protocol DTOs for `/v1/server-info`, `/v1/sync/push`,
 
 Accounts are registered on the server side. The client login flow only asks for server URL, account email, and master password. The master password is used locally to derive an auth hash for server login and to unlock the downloaded encrypted vault metadata; the master password itself is not sent as the API password field.
 
-Initialize local vault metadata:
+Initialize local vault metadata for low-level local dry-runs:
 
 ```bash
 ltd vault init
