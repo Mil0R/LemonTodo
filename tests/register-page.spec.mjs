@@ -24,7 +24,6 @@ test("register page creates an E2EE account usable by ltd login", async ({ page 
       "--",
       "--db",
       `/tmp/lemontodo-register-page-${randomUUID()}.db`,
-      "sync",
       "login",
       "--server-url",
       serverUrl,

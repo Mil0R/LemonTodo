@@ -101,10 +101,42 @@ enum Command {
     },
     /// Inspect pending local operations for future sync.
     Ops,
-    /// Local encrypted sync dry-run commands.
+    /// Log into a LemonTodo server account.
+    Login {
+        #[arg(long)]
+        email: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        master_password: Option<String>,
+        /// Override the default server URL for this login.
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Log out from the current LemonTodo server account.
+    Logout {
+        /// Only clear the local token without calling the server.
+        #[arg(long)]
+        local_only: bool,
+        /// Revoke every active server session for the current account.
+        #[arg(long)]
+        all: bool,
+        /// Override the configured server URL for this logout.
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Sync local and remote task data.
     Sync {
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        master_password: Option<String>,
+        /// Maximum number of encrypted objects to fetch before pushing.
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        /// Leave safe pulled remote operations in the inbox instead of applying them.
+        #[arg(long)]
+        no_apply_safe: bool,
         #[command(subcommand)]
-        command: SyncCommand,
+        command: Option<SyncCommand>,
     },
     /// Manage the local encrypted vault metadata.
     Vault {
@@ -126,6 +158,7 @@ enum ProjectCommand {
 #[derive(Debug, Subcommand)]
 enum SyncCommand {
     /// Configure remote sync settings.
+    #[command(hide = true)]
     Configure {
         #[arg(long)]
         server_url: String,
@@ -145,6 +178,7 @@ enum SyncCommand {
         server_url: Option<String>,
     },
     /// Log into a server account and save the access token locally.
+    #[command(hide = true)]
     Login {
         #[arg(long)]
         email: Option<String>,
@@ -156,6 +190,7 @@ enum SyncCommand {
         server_url: Option<String>,
     },
     /// Connect a new device by logging in, downloading vault metadata, and verifying the master password.
+    #[command(hide = true)]
     Connect {
         #[arg(long)]
         email: Option<String>,
@@ -179,6 +214,7 @@ enum SyncCommand {
         apply_safe: bool,
     },
     /// Revoke the current server session and clear the local access token.
+    #[command(hide = true)]
     Logout {
         /// Only clear the local token without calling the server.
         #[arg(long)]
@@ -193,6 +229,7 @@ enum SyncCommand {
     /// Show local sync state.
     Status,
     /// Show the current authenticated server account for the stored access token.
+    #[command(hide = true)]
     Whoami {
         /// Print the server response as pretty JSON.
         #[arg(long)]
@@ -202,6 +239,7 @@ enum SyncCommand {
         server_url: Option<String>,
     },
     /// List active server sessions for the current account.
+    #[command(hide = true)]
     Sessions {
         /// Print the server response as pretty JSON.
         #[arg(long)]
@@ -211,6 +249,7 @@ enum SyncCommand {
         server_url: Option<String>,
     },
     /// Revoke an active server session by id prefix from `ltd sync sessions`.
+    #[command(hide = true)]
     Revoke {
         session: String,
         /// Override the configured server URL for this request.
@@ -218,8 +257,10 @@ enum SyncCommand {
         server_url: Option<String>,
     },
     /// Generate a random local vault key as hex.
+    #[command(hide = true)]
     Keygen,
     /// Pack pending operations into encrypted sync objects.
+    #[command(hide = true)]
     Pack {
         #[arg(long)]
         key: Option<String>,
@@ -230,6 +271,7 @@ enum SyncCommand {
         out: Option<PathBuf>,
     },
     /// Upload pending encrypted operations to the configured server.
+    #[command(hide = true)]
     Push {
         #[arg(long)]
         key: Option<String>,
@@ -241,6 +283,7 @@ enum SyncCommand {
         server_url: Option<String>,
     },
     /// Download and decrypt remote operations without applying them locally.
+    #[command(hide = true)]
     Pull {
         #[arg(long)]
         key: Option<String>,
@@ -261,6 +304,7 @@ enum SyncCommand {
         no_save: bool,
     },
     /// Pull remote changes, optionally apply safe ones, then push local changes.
+    #[command(hide = true)]
     Now {
         #[arg(long)]
         key: Option<String>,
@@ -278,8 +322,10 @@ enum SyncCommand {
         apply_safe: bool,
     },
     /// Upload local encrypted vault metadata to the server account.
+    #[command(hide = true)]
     VaultPush,
     /// Download encrypted vault metadata from the server account.
+    #[command(hide = true)]
     VaultPull {
         #[arg(long)]
         force: bool,
@@ -310,6 +356,7 @@ enum SyncCommand {
         keep_remote: bool,
     },
     /// Mark local pending operations as synced after a successful upload.
+    #[command(hide = true)]
     Ack {
         /// Server cursor returned by a future sync endpoint.
         #[arg(long)]
@@ -474,442 +521,389 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Some(Command::Sync { command }) => match command {
-            SyncCommand::Configure { server_url, email } => {
-                store.save_sync_server_url(&server_url)?;
-                if let Some(email) = email {
-                    store.save_sync_account_email(&email)?;
+        Some(Command::Login {
+            email,
+            master_password,
+            server_url,
+        }) => {
+            run_login_command(&store, email, master_password, server_url)?;
+        }
+        Some(Command::Logout {
+            local_only,
+            all,
+            server_url,
+        }) => {
+            run_logout_command(&store, local_only, all, server_url)?;
+        }
+        Some(Command::Sync {
+            master_password,
+            limit,
+            no_apply_safe,
+            command,
+        }) => match command {
+            None => {
+                let summary = sync_now(&store, None, master_password, None, limit, !no_apply_safe)?;
+                print_sync_now_summary(summary);
+            }
+            Some(command) => match command {
+                SyncCommand::Configure { server_url, email } => {
+                    store.save_sync_server_url(&server_url)?;
+                    if let Some(email) = email {
+                        store.save_sync_account_email(&email)?;
+                    }
+                    println!(
+                        "Configured sync server {}{}",
+                        store.sync_server_url()?.unwrap(),
+                        store
+                            .sync_account_email()?
+                            .map(|email| format!(" account {email}"))
+                            .unwrap_or_default()
+                    );
                 }
-                println!(
-                    "Configured sync server {}{}",
-                    store.sync_server_url()?.unwrap(),
-                    store
-                        .sync_account_email()?
-                        .map(|email| format!(" account {email}"))
-                        .unwrap_or_default()
-                );
-            }
-            SyncCommand::Register {
-                email,
-                master_password,
-                server_url,
-            } => {
-                let master_password = master_password
-                    .map(Ok)
-                    .unwrap_or_else(prompt_new_master_password)?;
-                let response =
-                    register_account(&store, server_url.as_deref(), &email, &master_password)?;
-                store.save_sync_account_email(&response.email)?;
-                println!("Registered account {}", response.email);
-            }
-            SyncCommand::Login {
-                email,
-                master_password,
-                server_url,
-            } => {
-                let server_url = match server_url {
-                    Some(server_url) => Some(server_url),
-                    None => {
-                        let default = store
-                            .sync_server_url()?
-                            .unwrap_or_else(|| DEFAULT_SERVER_URL.to_owned());
-                        if io::stdin().is_terminal() {
-                            let input = prompt_text(&format!("Server [{default}]: "))?;
-                            if input.is_empty() {
-                                Some(default)
-                            } else {
-                                Some(input)
-                            }
-                        } else {
-                            Some(default)
+                SyncCommand::Register {
+                    email,
+                    master_password,
+                    server_url,
+                } => {
+                    let master_password = master_password
+                        .map(Ok)
+                        .unwrap_or_else(prompt_new_master_password)?;
+                    let response =
+                        register_account(&store, server_url.as_deref(), &email, &master_password)?;
+                    store.save_sync_account_email(&response.email)?;
+                    println!("Registered account {}", response.email);
+                }
+                SyncCommand::Login {
+                    email,
+                    master_password,
+                    server_url,
+                } => {
+                    run_login_command(&store, email, master_password, server_url)?;
+                }
+                SyncCommand::Connect {
+                    email,
+                    master_password,
+                    server_url,
+                    force,
+                    pull,
+                    limit,
+                    apply_safe,
+                } => {
+                    if apply_safe && !pull {
+                        anyhow::bail!("--apply-safe requires --pull");
+                    }
+                    let email = email
+                        .or(store.sync_account_email()?)
+                        .context("sync account email is not configured; pass --email")?;
+                    let master_password = master_password
+                        .map(Ok)
+                        .unwrap_or_else(|| prompt_master_password("Master password: "))?;
+                    let connected = connect_device(
+                        &store,
+                        DeviceConnectOptions {
+                            server_url: server_url.as_deref(),
+                            email: &email,
+                            master_password: &master_password,
+                            force,
+                            pull,
+                            limit,
+                            apply_safe,
+                        },
+                    )?;
+                    println!("Connected device for {}", connected.email);
+                    if let Some(pulled) = connected.pulled {
+                        println!(
+                            "Pulled {} object(s), saved {}, cursor {}, has_more {}",
+                            pulled.fetched, pulled.saved, pulled.cursor, pulled.has_more
+                        );
+                        for operation in &pulled.operations {
+                            println!(
+                                "{} {} {} rev:{} {}",
+                                short_id(&operation.id.to_string()),
+                                operation.object_type.as_str(),
+                                operation.operation_type.as_str(),
+                                operation.object_revision,
+                                operation.object_id
+                            );
+                        }
+                        if let Some(applied) = pulled.applied {
+                            println!(
+                                "Applied {}, skipped {}, conflicts {}",
+                                applied.applied, applied.skipped, applied.conflicts
+                            );
                         }
                     }
-                };
-                let email = match email.or(store.sync_account_email()?) {
-                    Some(email) => email,
-                    None => prompt_text("Account email: ")?,
-                };
-                if email.trim().is_empty() {
-                    anyhow::bail!("account email cannot be empty");
                 }
-                let master_password = master_password
-                    .map(Ok)
-                    .unwrap_or_else(|| prompt_master_password("Master password: "))?;
-                let response =
-                    login_account(&store, server_url.as_deref(), &email, &master_password)?;
-                let vault_metadata = fetch_vault_metadata_for_token(
-                    &store,
-                    server_url.as_deref(),
-                    &response.access_token,
-                )?;
-                verify_or_save_vault_metadata(&store, &vault_metadata, &master_password)?;
-                store.save_sync_server_url(server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL))?;
-                store.save_sync_account_email(&response.email)?;
-                store.save_sync_access_token(&response.access_token)?;
-                println!("Logged in as {}", response.email);
-            }
-            SyncCommand::Connect {
-                email,
-                master_password,
-                server_url,
-                force,
-                pull,
-                limit,
-                apply_safe,
-            } => {
-                if apply_safe && !pull {
-                    anyhow::bail!("--apply-safe requires --pull");
+                SyncCommand::Logout {
+                    local_only,
+                    all,
+                    server_url,
+                } => {
+                    run_logout_command(&store, local_only, all, server_url)?;
                 }
-                let email = email
-                    .or(store.sync_account_email()?)
-                    .context("sync account email is not configured; pass --email or run ltd sync configure --email <email>")?;
-                let master_password = master_password
-                    .map(Ok)
-                    .unwrap_or_else(|| prompt_master_password("Master password: "))?;
-                let connected = connect_device(
-                    &store,
-                    DeviceConnectOptions {
-                        server_url: server_url.as_deref(),
-                        email: &email,
-                        master_password: &master_password,
-                        force,
-                        pull,
-                        limit,
-                        apply_safe,
-                    },
-                )?;
-                println!("Connected device for {}", connected.email);
-                if let Some(pulled) = connected.pulled {
-                    println!(
-                        "Pulled {} object(s), saved {}, cursor {}, has_more {}",
-                        pulled.fetched, pulled.saved, pulled.cursor, pulled.has_more
-                    );
-                    for operation in &pulled.operations {
-                        println!(
-                            "{} {} {} rev:{} {}",
-                            short_id(&operation.id.to_string()),
-                            operation.object_type.as_str(),
-                            operation.operation_type.as_str(),
-                            operation.object_revision,
-                            operation.object_id
-                        );
-                    }
-                    if let Some(applied) = pulled.applied {
-                        println!(
-                            "Applied {}, skipped {}, conflicts {}",
-                            applied.applied, applied.skipped, applied.conflicts
-                        );
-                    }
-                }
-            }
-            SyncCommand::Logout {
-                local_only,
-                all,
-                server_url,
-            } => {
-                if local_only && all {
-                    bail!("use either --local-only or --all, not both");
-                }
-                let token = store
-                    .sync_access_token()?
-                    .context("sync access token is not configured; run ltd sync login")?;
-                if all {
-                    let revoked = logout_all_sessions(&store, server_url.as_deref())?;
-                    store.clear_sync_access_token()?;
-                    println!("Logged out and revoked {revoked} remote session(s)");
-                } else {
-                    let revoked = if local_only {
-                        false
+                SyncCommand::Status => {
+                    let pending = store.pending_operations()?.len();
+                    let cursor = store
+                        .last_sync_cursor()?
+                        .unwrap_or_else(|| "<none>".to_owned());
+                    let server = store
+                        .sync_server_url()?
+                        .unwrap_or_else(|| "<not configured>".to_owned());
+                    let email = store
+                        .sync_account_email()?
+                        .unwrap_or_else(|| "<not configured>".to_owned());
+                    let token = if store.sync_access_token()?.is_some() {
+                        "configured"
                     } else {
-                        logout_account(&store, server_url.as_deref(), &token)?.revoked
+                        "<not configured>"
                     };
-                    store.clear_sync_access_token()?;
+                    let vault_metadata = if store.encrypted_vault_key()?.is_some() {
+                        "configured"
+                    } else {
+                        "<not initialized>"
+                    };
+                    println!("Device {}", store.device_id()?);
+                    println!("Server {server}");
+                    println!("Account {email}");
+                    println!("Access token {token}");
+                    println!("Vault metadata {vault_metadata}");
+                    println!("Last cursor {cursor}");
+                    println!("Pending operations {pending}");
                     println!(
-                        "Logged out{}",
-                        if revoked {
-                            " and revoked remote session"
+                        "Pending remote operations {}",
+                        store.pending_remote_operation_count()?
+                    );
+                    if store.sync_server_url()?.is_some() && store.sync_access_token()?.is_some() {
+                        match fetch_account_status(&store, None) {
+                            Ok(status) => print_remote_account_status(&status),
+                            Err(error) => println!("Remote status error {error}"),
+                        }
+                    } else {
+                        println!("Remote account <unavailable>");
+                    }
+                }
+                SyncCommand::Whoami { json, server_url } => {
+                    let status = fetch_account_status(&store, server_url.as_deref())?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&status)?);
+                    } else {
+                        print_remote_account_status(&status);
+                    }
+                }
+                SyncCommand::Sessions { json, server_url } => {
+                    let sessions = fetch_sessions(&store, server_url.as_deref())?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&sessions)?);
+                    } else {
+                        print_sessions(&sessions);
+                    }
+                }
+                SyncCommand::Revoke {
+                    session,
+                    server_url,
+                } => {
+                    let response =
+                        revoke_session_by_prefix(&store, server_url.as_deref(), &session)?;
+                    if response.current {
+                        store.clear_sync_access_token()?;
+                    }
+                    println!(
+                        "Revoked session {}{}",
+                        response.session_id,
+                        if response.current {
+                            " and cleared local token"
                         } else {
                             ""
                         }
                     );
                 }
-            }
-            SyncCommand::Status => {
-                let pending = store.pending_operations()?.len();
-                let cursor = store
-                    .last_sync_cursor()?
-                    .unwrap_or_else(|| "<none>".to_owned());
-                let server = store
-                    .sync_server_url()?
-                    .unwrap_or_else(|| "<not configured>".to_owned());
-                let email = store
-                    .sync_account_email()?
-                    .unwrap_or_else(|| "<not configured>".to_owned());
-                let token = if store.sync_access_token()?.is_some() {
-                    "configured"
-                } else {
-                    "<not configured>"
-                };
-                let vault_metadata = if store.encrypted_vault_key()?.is_some() {
-                    "configured"
-                } else {
-                    "<not initialized>"
-                };
-                println!("Device {}", store.device_id()?);
-                println!("Server {server}");
-                println!("Account {email}");
-                println!("Access token {token}");
-                println!("Vault metadata {vault_metadata}");
-                println!("Last cursor {cursor}");
-                println!("Pending operations {pending}");
-                println!(
-                    "Pending remote operations {}",
-                    store.pending_remote_operation_count()?
-                );
-                if store.sync_server_url()?.is_some() && store.sync_access_token()?.is_some() {
-                    match fetch_account_status(&store, None) {
-                        Ok(status) => print_remote_account_status(&status),
-                        Err(error) => println!("Remote status error {error}"),
-                    }
-                } else {
-                    println!("Remote account <unavailable>");
+                SyncCommand::Keygen => {
+                    println!("{}", VaultKey::generate().to_hex());
                 }
-            }
-            SyncCommand::Whoami { json, server_url } => {
-                let status = fetch_account_status(&store, server_url.as_deref())?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&status)?);
-                } else {
-                    print_remote_account_status(&status);
-                }
-            }
-            SyncCommand::Sessions { json, server_url } => {
-                let sessions = fetch_sessions(&store, server_url.as_deref())?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&sessions)?);
-                } else {
-                    print_sessions(&sessions);
-                }
-            }
-            SyncCommand::Revoke {
-                session,
-                server_url,
-            } => {
-                let response = revoke_session_by_prefix(&store, server_url.as_deref(), &session)?;
-                if response.current {
-                    store.clear_sync_access_token()?;
-                }
-                println!(
-                    "Revoked session {}{}",
-                    response.session_id,
-                    if response.current {
-                        " and cleared local token"
-                    } else {
-                        ""
-                    }
-                );
-            }
-            SyncCommand::Keygen => {
-                println!("{}", VaultKey::generate().to_hex());
-            }
-            SyncCommand::Pack {
-                key,
-                master_password,
-                out,
-            } => {
-                let vault_key = load_vault_key(&store, key.as_deref(), master_password)?;
-                let operations = store.pending_operations()?;
-                let pack = pack_operations(&vault_key, store.device_id()?, &operations)?;
-                let json = serde_json::to_string_pretty(&pack)?;
-                if let Some(path) = out {
-                    fs::write(&path, json)
-                        .with_context(|| format!("failed to write sync pack {}", path.display()))?;
-                    println!(
-                        "Packed {} encrypted sync objects to {}",
-                        pack.objects.len(),
-                        path.display()
-                    );
-                } else {
-                    println!("{json}");
-                }
-            }
-            SyncCommand::Push {
-                key,
-                master_password,
-                server_url,
-            } => {
-                let pushed = push_pending_operations(
-                    &store,
-                    key.as_deref(),
+                SyncCommand::Pack {
+                    key,
                     master_password,
-                    server_url.as_deref(),
-                )?;
-                println!(
-                    "Pushed {} accepted, {} rejected, cursor {}",
-                    pushed.accepted, pushed.rejected, pushed.cursor
-                );
-            }
-            SyncCommand::Pull {
-                key,
-                master_password,
-                server_url,
-                limit,
-                json,
-                no_save,
-            } => {
-                let pulled = pull_remote_operations(
-                    &store,
-                    key.as_deref(),
-                    master_password,
-                    server_url.as_deref(),
-                    limit,
-                )?;
-                let saved = if no_save {
-                    0
-                } else {
-                    store.save_remote_operations(&pulled.operations, &pulled.cursor)?
-                };
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&pulled.operations)?);
-                } else {
-                    println!(
-                        "Pulled {} object(s), saved {}, cursor {}, has_more {}",
-                        pulled.operations.len(),
-                        saved,
-                        pulled.cursor,
-                        pulled.has_more
-                    );
-                    for operation in &pulled.operations {
+                    out,
+                } => {
+                    let vault_key = load_vault_key(&store, key.as_deref(), master_password)?;
+                    let operations = store.pending_operations()?;
+                    let pack = pack_operations(&vault_key, store.device_id()?, &operations)?;
+                    let json = serde_json::to_string_pretty(&pack)?;
+                    if let Some(path) = out {
+                        fs::write(&path, json).with_context(|| {
+                            format!("failed to write sync pack {}", path.display())
+                        })?;
                         println!(
-                            "{} {} {} rev:{} {}",
-                            short_id(&operation.id.to_string()),
-                            operation.object_type.as_str(),
-                            operation.operation_type.as_str(),
-                            operation.object_revision,
-                            operation.object_id
+                            "Packed {} encrypted sync objects to {}",
+                            pack.objects.len(),
+                            path.display()
                         );
+                    } else {
+                        println!("{json}");
                     }
                 }
-            }
-            SyncCommand::Now {
-                key,
-                master_password,
-                server_url,
-                limit,
-                apply_safe,
-            } => {
-                let summary = sync_now(
-                    &store,
-                    key.as_deref(),
+                SyncCommand::Push {
+                    key,
                     master_password,
-                    server_url.as_deref(),
+                    server_url,
+                } => {
+                    let pushed = push_pending_operations(
+                        &store,
+                        key.as_deref(),
+                        master_password,
+                        server_url.as_deref(),
+                    )?;
+                    println!(
+                        "Pushed {} accepted, {} rejected, cursor {}",
+                        pushed.accepted, pushed.rejected, pushed.cursor
+                    );
+                }
+                SyncCommand::Pull {
+                    key,
+                    master_password,
+                    server_url,
+                    limit,
+                    json,
+                    no_save,
+                } => {
+                    let pulled = pull_remote_operations(
+                        &store,
+                        key.as_deref(),
+                        master_password,
+                        server_url.as_deref(),
+                        limit,
+                    )?;
+                    let saved = if no_save {
+                        0
+                    } else {
+                        store.save_remote_operations(&pulled.operations, &pulled.cursor)?
+                    };
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&pulled.operations)?);
+                    } else {
+                        println!(
+                            "Pulled {} object(s), saved {}, cursor {}, has_more {}",
+                            pulled.operations.len(),
+                            saved,
+                            pulled.cursor,
+                            pulled.has_more
+                        );
+                        for operation in &pulled.operations {
+                            println!(
+                                "{} {} {} rev:{} {}",
+                                short_id(&operation.id.to_string()),
+                                operation.object_type.as_str(),
+                                operation.operation_type.as_str(),
+                                operation.object_revision,
+                                operation.object_id
+                            );
+                        }
+                    }
+                }
+                SyncCommand::Now {
+                    key,
+                    master_password,
+                    server_url,
                     limit,
                     apply_safe,
-                )?;
-                println!(
-                    "Pulled {} object(s), saved {}, cursor {}, has_more {}",
-                    summary.pulled.operations.len(),
-                    summary.saved,
-                    summary.pulled.cursor,
-                    summary.pulled.has_more
-                );
-                if let Some(applied) = summary.applied {
+                } => {
+                    let summary = sync_now(
+                        &store,
+                        key.as_deref(),
+                        master_password,
+                        server_url.as_deref(),
+                        limit,
+                        apply_safe,
+                    )?;
+                    print_sync_now_summary(summary);
+                }
+                SyncCommand::VaultPush => {
+                    push_vault_metadata(&store)?;
+                    println!("Uploaded encrypted vault metadata");
+                }
+                SyncCommand::VaultPull { force } => {
+                    let downloaded = pull_vault_metadata(&store, force)?;
+                    if downloaded {
+                        println!("Downloaded encrypted vault metadata");
+                    } else {
+                        println!("Server account has no encrypted vault metadata");
+                    }
+                }
+                SyncCommand::Inbox { json } => {
+                    let pending = store.pending_remote_operations()?;
+                    if json {
+                        let operations = pending
+                            .iter()
+                            .map(|remote| &remote.operation)
+                            .collect::<Vec<_>>();
+                        println!("{}", serde_json::to_string_pretty(&operations)?);
+                    } else if pending.is_empty() {
+                        println!("No pending remote operations");
+                    } else {
+                        print_remote_operations(&store, &pending)?;
+                    }
+                }
+                SyncCommand::Conflicts { json } => {
+                    let conflicts = store.pending_remote_conflicts()?;
+                    if json {
+                        let operations = conflicts
+                            .iter()
+                            .map(|remote| &remote.operation)
+                            .collect::<Vec<_>>();
+                        println!("{}", serde_json::to_string_pretty(&operations)?);
+                    } else if conflicts.is_empty() {
+                        println!("No pending remote conflicts");
+                    } else {
+                        print_remote_operations(&store, &conflicts)?;
+                    }
+                }
+                SyncCommand::Apply => {
+                    let summary = store.apply_pending_remote_operations()?;
                     println!(
                         "Applied {}, skipped {}, conflicts {}",
-                        applied.applied, applied.skipped, applied.conflicts
+                        summary.applied, summary.skipped, summary.conflicts
                     );
                 }
-                println!(
-                    "Pushed {} accepted, {} rejected, cursor {}",
-                    summary.pushed.accepted, summary.pushed.rejected, summary.pushed.cursor
-                );
-            }
-            SyncCommand::VaultPush => {
-                push_vault_metadata(&store)?;
-                println!("Uploaded encrypted vault metadata");
-            }
-            SyncCommand::VaultPull { force } => {
-                let downloaded = pull_vault_metadata(&store, force)?;
-                if downloaded {
-                    println!("Downloaded encrypted vault metadata");
-                } else {
-                    println!("Server account has no encrypted vault metadata");
+                SyncCommand::Resolve {
+                    operation,
+                    keep_local,
+                    keep_remote,
+                } => {
+                    if keep_local == keep_remote {
+                        anyhow::bail!("use exactly one of --keep-local or --keep-remote");
+                    }
+                    let resolved = if keep_local {
+                        store.resolve_remote_conflict_keep_local(&operation)?
+                    } else {
+                        store.resolve_remote_conflict_keep_remote(&operation)?
+                    };
+                    println!(
+                        "Resolved {} as {}",
+                        short_id(&resolved.operation.id.to_string()),
+                        resolved.apply_status
+                    );
                 }
-            }
-            SyncCommand::Inbox { json } => {
-                let pending = store.pending_remote_operations()?;
-                if json {
-                    let operations = pending
-                        .iter()
-                        .map(|remote| &remote.operation)
-                        .collect::<Vec<_>>();
-                    println!("{}", serde_json::to_string_pretty(&operations)?);
-                } else if pending.is_empty() {
-                    println!("No pending remote operations");
-                } else {
-                    print_remote_operations(&store, &pending)?;
-                }
-            }
-            SyncCommand::Conflicts { json } => {
-                let conflicts = store.pending_remote_conflicts()?;
-                if json {
-                    let operations = conflicts
-                        .iter()
-                        .map(|remote| &remote.operation)
-                        .collect::<Vec<_>>();
-                    println!("{}", serde_json::to_string_pretty(&operations)?);
-                } else if conflicts.is_empty() {
-                    println!("No pending remote conflicts");
-                } else {
-                    print_remote_operations(&store, &conflicts)?;
-                }
-            }
-            SyncCommand::Apply => {
-                let summary = store.apply_pending_remote_operations()?;
-                println!(
-                    "Applied {}, skipped {}, conflicts {}",
-                    summary.applied, summary.skipped, summary.conflicts
-                );
-            }
-            SyncCommand::Resolve {
-                operation,
-                keep_local,
-                keep_remote,
-            } => {
-                if keep_local == keep_remote {
-                    anyhow::bail!("use exactly one of --keep-local or --keep-remote");
-                }
-                let resolved = if keep_local {
-                    store.resolve_remote_conflict_keep_local(&operation)?
-                } else {
-                    store.resolve_remote_conflict_keep_remote(&operation)?
-                };
-                println!(
-                    "Resolved {} as {}",
-                    short_id(&resolved.operation.id.to_string()),
-                    resolved.apply_status
-                );
-            }
-            SyncCommand::Ack {
-                cursor,
-                all_pending,
-                operations,
-            } => {
-                if all_pending && !operations.is_empty() {
-                    anyhow::bail!("use either --all-pending or operation ids, not both");
-                }
-                if !all_pending && operations.is_empty() {
-                    anyhow::bail!("provide operation ids or use --all-pending");
-                }
+                SyncCommand::Ack {
+                    cursor,
+                    all_pending,
+                    operations,
+                } => {
+                    if all_pending && !operations.is_empty() {
+                        anyhow::bail!("use either --all-pending or operation ids, not both");
+                    }
+                    if !all_pending && operations.is_empty() {
+                        anyhow::bail!("provide operation ids or use --all-pending");
+                    }
 
-                let updated = if all_pending {
-                    store.mark_pending_operations_synced(cursor.as_deref())?
-                } else {
-                    let operation_ids = store.operation_ids_by_prefixes(&operations)?;
-                    store.mark_operations_synced(&operation_ids, cursor.as_deref())?
-                };
-                println!("Marked {updated} operation(s) as synced");
-            }
+                    let updated = if all_pending {
+                        store.mark_pending_operations_synced(cursor.as_deref())?
+                    } else {
+                        let operation_ids = store.operation_ids_by_prefixes(&operations)?;
+                        store.mark_operations_synced(&operation_ids, cursor.as_deref())?
+                    };
+                    println!("Marked {updated} operation(s) as synced");
+                }
+            },
         },
         Some(Command::Vault { command }) => match command {
             VaultCommand::Init { master_password } => {
@@ -1112,6 +1106,106 @@ fn sync_now(
     })
 }
 
+fn run_login_command(
+    store: &TodoStore,
+    email: Option<String>,
+    master_password: Option<String>,
+    server_url: Option<String>,
+) -> Result<()> {
+    let server_url = match server_url {
+        Some(server_url) => Some(server_url),
+        None => {
+            let default = store
+                .sync_server_url()?
+                .unwrap_or_else(|| DEFAULT_SERVER_URL.to_owned());
+            if io::stdin().is_terminal() {
+                let input = prompt_text(&format!("Server [{default}]: "))?;
+                if input.is_empty() {
+                    Some(default)
+                } else {
+                    Some(input)
+                }
+            } else {
+                Some(default)
+            }
+        }
+    };
+    let email = match email.or(store.sync_account_email()?) {
+        Some(email) => email,
+        None => prompt_text("Account email: ")?,
+    };
+    if email.trim().is_empty() {
+        anyhow::bail!("account email cannot be empty");
+    }
+    let master_password = master_password
+        .map(Ok)
+        .unwrap_or_else(|| prompt_master_password("Master password: "))?;
+    let response = login_account(store, server_url.as_deref(), &email, &master_password)?;
+    let vault_metadata =
+        fetch_vault_metadata_for_token(store, server_url.as_deref(), &response.access_token)?;
+    verify_or_save_vault_metadata(store, &vault_metadata, &master_password)?;
+    store.save_sync_server_url(server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL))?;
+    store.save_sync_account_email(&response.email)?;
+    store.save_sync_access_token(&response.access_token)?;
+    println!("Logged in as {}", response.email);
+    Ok(())
+}
+
+fn run_logout_command(
+    store: &TodoStore,
+    local_only: bool,
+    all: bool,
+    server_url: Option<String>,
+) -> Result<()> {
+    if local_only && all {
+        bail!("use either --local-only or --all, not both");
+    }
+    let token = store
+        .sync_access_token()?
+        .context("sync access token is not configured; run ltd login")?;
+    if all {
+        let revoked = logout_all_sessions(store, server_url.as_deref())?;
+        store.clear_sync_access_token()?;
+        println!("Logged out and revoked {revoked} remote session(s)");
+    } else {
+        let revoked = if local_only {
+            false
+        } else {
+            logout_account(store, server_url.as_deref(), &token)?.revoked
+        };
+        store.clear_sync_access_token()?;
+        println!(
+            "Logged out{}",
+            if revoked {
+                " and revoked remote session"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(())
+}
+
+fn print_sync_now_summary(summary: SyncNowSummary) {
+    println!(
+        "Pulled {} object(s), saved {}, cursor {}, has_more {}",
+        summary.pulled.operations.len(),
+        summary.saved,
+        summary.pulled.cursor,
+        summary.pulled.has_more
+    );
+    if let Some(applied) = summary.applied {
+        println!(
+            "Applied {}, skipped {}, conflicts {}",
+            applied.applied, applied.skipped, applied.conflicts
+        );
+    }
+    println!(
+        "Pushed {} accepted, {} rejected, cursor {}",
+        summary.pushed.accepted, summary.pushed.rejected, summary.pushed.cursor
+    );
+}
+
 fn push_vault_metadata(store: &TodoStore) -> Result<()> {
     let server_url = configured_server_url(store, None)?;
     let access_token = configured_access_token(store)?;
@@ -1184,7 +1278,7 @@ fn connect_device(
     )?;
     let response = get_vault_metadata_request(&server_url, &login.access_token)?;
     let encrypted_vault_key = response.encrypted_vault_key.context(
-        "server account has no encrypted vault metadata; initialize another device and run ltd sync vault push first",
+        "server account has no encrypted vault metadata; register the account on the server first",
     )?;
     import_remote_vault_metadata(
         store,
@@ -1394,9 +1488,9 @@ fn print_sessions(response: &SessionsResponse) {
 
 fn auth_hint_from_message(message: &str) -> Option<&'static str> {
     if message.contains("expired access token") {
-        Some("server rejected the stored access token as expired; run ltd sync login again")
+        Some("server rejected the stored access token as expired; run ltd login again")
     } else if message.contains("invalid access token") {
-        Some("server rejected the stored access token; run ltd sync login again")
+        Some("server rejected the stored access token; run ltd login again")
     } else {
         None
     }
@@ -1411,7 +1505,7 @@ fn checked_response(
         Err(ureq::Error::StatusCode(code)) => {
             let message = format!("request failed with HTTP {code} at {endpoint}");
             if code == 401 {
-                bail!("{message}: run ltd sync login again");
+                bail!("{message}: run ltd login again");
             }
             bail!("{message}");
         }
@@ -1602,7 +1696,7 @@ fn configured_server_url(store: &TodoStore, override_url: Option<&str>) -> Resul
 fn configured_access_token(store: &TodoStore) -> Result<String> {
     store
         .sync_access_token()?
-        .context("sync access token is not configured; run ltd sync login")
+        .context("sync access token is not configured; run ltd login")
 }
 
 fn ensure_vault_metadata_write_allowed(store: &TodoStore, force: bool) -> Result<()> {
@@ -2003,24 +2097,33 @@ fn default_db_path() -> PathBuf {
 }
 
 fn default_db_path_for_command(command: &Option<Command>) -> PathBuf {
-    if let Some(Command::Sync {
-        command:
-            SyncCommand::Login {
-                email: Some(email),
-                server_url,
-                ..
-            }
-            | SyncCommand::Connect {
-                email: Some(email),
-                server_url,
-                ..
-            },
-    }) = command
-    {
-        let server_url = server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL);
-        return account_db_path(server_url, email);
+    match command {
+        Some(Command::Login {
+            email: Some(email),
+            server_url,
+            ..
+        })
+        | Some(Command::Sync {
+            command:
+                Some(
+                    SyncCommand::Login {
+                        email: Some(email),
+                        server_url,
+                        ..
+                    }
+                    | SyncCommand::Connect {
+                        email: Some(email),
+                        server_url,
+                        ..
+                    },
+                ),
+            ..
+        }) => {
+            let server_url = server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL);
+            account_db_path(server_url, email)
+        }
+        _ => default_db_path(),
     }
-    default_db_path()
 }
 
 fn account_db_path(server_url: &str, email: &str) -> PathBuf {

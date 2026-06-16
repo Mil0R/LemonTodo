@@ -92,27 +92,25 @@ start_server() {
 init_client_a() {
     log "initializing client A"
     run_ltd --db "${CLIENT_A_DB}" init
-    run_ltd --db "${CLIENT_A_DB}" sync configure --server-url "${SERVER_URL}" --email "${ACCOUNT_EMAIL}"
     run_ltd --db "${CLIENT_A_DB}" sync register --email "${ACCOUNT_EMAIL}" --master-password "${MASTER_PASSWORD}"
-    run_ltd --db "${CLIENT_A_DB}" sync login --email "${ACCOUNT_EMAIL}" --master-password "${MASTER_PASSWORD}"
+    run_ltd --db "${CLIENT_A_DB}" login --server-url "${SERVER_URL}" --email "${ACCOUNT_EMAIL}" --master-password "${MASTER_PASSWORD}"
 }
 
 seed_client_a() {
     log "creating initial task on client A"
     run_ltd --db "${CLIENT_A_DB}" project add "${PROJECT_NAME}"
     run_ltd --db "${CLIENT_A_DB}" add "${TASK_A_TITLE}" --project "${PROJECT_NAME}"
-    run_ltd --db "${CLIENT_A_DB}" sync now --master-password "${MASTER_PASSWORD}" --apply-safe
+    run_ltd --db "${CLIENT_A_DB}" sync --master-password "${MASTER_PASSWORD}"
 }
 
 connect_client_b() {
     log "connecting client B as a second device"
     run_ltd --db "${CLIENT_B_DB}" init
-    run_ltd --db "${CLIENT_B_DB}" sync configure --server-url "${SERVER_URL}" --email "${ACCOUNT_EMAIL}"
-    run_ltd --db "${CLIENT_B_DB}" sync connect \
+    run_ltd --db "${CLIENT_B_DB}" login \
+        --server-url "${SERVER_URL}" \
         --email "${ACCOUNT_EMAIL}" \
-        --master-password "${MASTER_PASSWORD}" \
-        --pull \
-        --apply-safe
+        --master-password "${MASTER_PASSWORD}"
+    run_ltd --db "${CLIENT_B_DB}" sync --master-password "${MASTER_PASSWORD}"
 
     local listed
     listed="$(run_ltd --db "${CLIENT_B_DB}" list --all)"
@@ -122,8 +120,8 @@ connect_client_b() {
 verify_bidirectional_sync() {
     log "verifying bidirectional sync"
     run_ltd --db "${CLIENT_B_DB}" add "${TASK_B_TITLE}" --project "${PROJECT_NAME}"
-    run_ltd --db "${CLIENT_B_DB}" sync now --master-password "${MASTER_PASSWORD}" --apply-safe
-    run_ltd --db "${CLIENT_A_DB}" sync now --master-password "${MASTER_PASSWORD}" --apply-safe
+    run_ltd --db "${CLIENT_B_DB}" sync --master-password "${MASTER_PASSWORD}"
+    run_ltd --db "${CLIENT_A_DB}" sync --master-password "${MASTER_PASSWORD}"
 
     local listed_a
     listed_a="$(run_ltd --db "${CLIENT_A_DB}" list --all)"
@@ -145,8 +143,8 @@ verify_conflict_flow() {
 
     run_ltd --db "${CLIENT_A_DB}" edit "${task_id}" "${TASK_CONFLICT_A}"
     run_ltd --db "${CLIENT_B_DB}" edit "${task_id}" "${TASK_CONFLICT_B}"
-    run_ltd --db "${CLIENT_A_DB}" sync now --master-password "${MASTER_PASSWORD}" --apply-safe
-    run_ltd --db "${CLIENT_B_DB}" sync now --master-password "${MASTER_PASSWORD}" --apply-safe
+    run_ltd --db "${CLIENT_A_DB}" sync --master-password "${MASTER_PASSWORD}"
+    run_ltd --db "${CLIENT_B_DB}" sync --master-password "${MASTER_PASSWORD}"
 
     local conflicts
     conflicts="$(run_ltd --db "${CLIENT_B_DB}" sync conflicts)"

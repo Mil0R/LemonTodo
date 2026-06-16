@@ -84,7 +84,7 @@ npm install
 ./scripts/e2e-register-page.sh
 ```
 
-This builds the registration WASM bundle, starts a temporary local server, registers through `/register` in Playwright, and verifies that `ltd sync login` can use the created account. If `wasm-bindgen` CLI or the `wasm32-unknown-unknown` target is missing, the script exits successfully with a skip message.
+This builds the registration WASM bundle, starts a temporary local server, registers through `/register` in Playwright, and verifies that `ltd login` can use the created account. If `wasm-bindgen` CLI or the `wasm32-unknown-unknown` target is missing, the script exits successfully with a skip message.
 
 Available server endpoints:
 
@@ -172,15 +172,10 @@ cargo run -p lemontodo-tui -- tags <task-id-prefix> mvp terminal
 cargo run -p lemontodo-tui -- export ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- import ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- ops
-cargo run -p lemontodo-tui -- sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-cargo run -p lemontodo-tui -- sync login --email you@example.com
-cargo run -p lemontodo-tui -- sync connect --email you@example.com
-cargo run -p lemontodo-tui -- sync connect --email you@example.com --pull
-cargo run -p lemontodo-tui -- sync connect --email you@example.com --pull --apply-safe
-cargo run -p lemontodo-tui -- sync whoami
-cargo run -p lemontodo-tui -- sync logout
-cargo run -p lemontodo-tui -- sync vault-push
-cargo run -p lemontodo-tui -- sync vault-pull
+cargo run -p lemontodo-tui -- login --server-url http://127.0.0.1:8787 --email you@example.com
+cargo run -p lemontodo-tui -- sync
+cargo run -p lemontodo-tui -- sync status
+cargo run -p lemontodo-tui -- logout
 cargo run -p lemontodo-tui -- move <task-id-prefix> LemonTodo
 cargo run -p lemontodo-tui -- done <task-id-prefix>
 cargo run -p lemontodo-tui -- archive <task-id-prefix>
@@ -214,24 +209,13 @@ ltd archive <task-id-prefix>
 ltd export ./lemontodo.snapshot.json
 ltd import ./lemontodo.snapshot.json
 ltd ops
-ltd vault init
-ltd vault status
-ltd sync pack --out ./sync-pack.json
-ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-ltd sync login --email you@example.com
-ltd sync connect --email you@example.com
-ltd sync connect --email you@example.com --pull
-ltd sync connect --email you@example.com --pull --apply-safe
-ltd sync now
-ltd sync now --apply-safe
-ltd sync whoami
-ltd sync sessions
-ltd sync revoke <session-id-prefix>
+ltd login --server-url http://127.0.0.1:8787 --email you@example.com
+ltd sync
 ltd sync status
-ltd sync logout
-ltd sync logout --all
-ltd sync vault-push
-ltd sync vault-pull
+ltd sync inbox
+ltd sync conflicts
+ltd logout
+ltd logout --all
 ltd move <task-id-prefix> LemonTodo
 ```
 
@@ -310,80 +294,49 @@ Initialize local vault metadata for low-level local dry-runs:
 ltd vault init
 ```
 
-Create an encrypted sync pack:
-
-```bash
-ltd sync pack --out ./sync-pack.json
-```
-
 Inspect local sync state:
 
 ```bash
 ltd sync status
 ```
 
-Configure a sync server and push pending encrypted operations:
+Log in to a server account:
 
 ```bash
-ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-ltd sync login --email you@example.com
-ltd sync push
-```
-
-Connect a new device to an existing account:
-
-```bash
-ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-ltd sync connect --email you@example.com
-```
-
-Connect a new device and pull the first batch of remote operations into the local inbox:
-
-```bash
-ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-ltd sync connect --email you@example.com --pull
-```
-
-Connect a new device, pull the first batch, and immediately apply only safe remote operations:
-
-```bash
-ltd sync configure --server-url http://127.0.0.1:8787 --email you@example.com
-ltd sync connect --email you@example.com --pull --apply-safe
-```
-
-Pull and decrypt remote operations without applying them locally:
-
-```bash
-ltd sync pull
-ltd sync inbox
-ltd sync conflicts
-ltd sync resolve <remote-operation-id-prefix> --keep-local
-ltd sync resolve <remote-operation-id-prefix> --keep-remote
-ltd sync apply
-ltd sync pull --json
+ltd login --server-url http://127.0.0.1:8787 --email you@example.com
 ```
 
 Run one manual sync pass for daily use:
 
 ```bash
-ltd sync now
-ltd sync now --apply-safe
+ltd sync
+```
+
+Leave safe remote operations in the inbox instead of applying them:
+
+```bash
+ltd sync --no-apply-safe
+```
+
+Inspect and resolve pulled remote operations:
+
+```bash
+ltd sync inbox
+ltd sync conflicts
+ltd sync resolve <remote-operation-id-prefix> --keep-local
+ltd sync resolve <remote-operation-id-prefix> --keep-remote
+ltd sync apply
 ```
 
 `ltd sync inbox` shows each pending remote operation with apply status, remote/local revision, local pending-op count, and skip/conflict reason when available.
 `ltd sync conflicts` narrows the inbox to pending remote conflicts that need manual handling and shows the same revision context.
 `ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
-`ltd sync now` pulls and saves remote operations first, optionally applies safe operations with `--apply-safe`, and then pushes local pending operations. Pulling first avoids advancing the local cursor past remote changes that this device has not seen yet.
+`ltd sync` pulls and saves remote operations first, applies safe operations by default, and then pushes local pending operations. Pulling first avoids advancing the local cursor past remote changes that this device has not seen yet.
 `ltd sync status` shows the configured server account email, whether an access token is stored locally, whether local vault metadata exists, and when possible also fetches the current remote account/session view from the server.
-`ltd sync whoami` calls the server with the stored access token and shows which account and session the server currently sees, including whether encrypted vault metadata exists remotely and which device metadata is attached to that session.
-`ltd sync sessions` lists active sessions/devices for the current account and marks the current session.
-`ltd sync revoke <session-id-prefix>` revokes one active session from `ltd sync sessions`. If it revokes the current session, the local token is cleared.
-`ltd sync logout` clears the local token and, unless `--local-only` is used, revokes the current server session first. `ltd sync logout --all` revokes every active server session for the current account and then clears the local token.
-`ltd sync vault-push` uploads the local `EncryptedVaultKey` to the current server account. `ltd sync vault-pull` downloads it for a new device and refuses to overwrite local metadata unless `--force` is passed.
-`ltd sync login` verifies the server is reachable through the login request, authenticates with an auth hash derived from the account email and master password, downloads encrypted vault metadata, and verifies that the master password can unlock it before saving local session state.
-`ltd sync connect` is the recommended new-device onboarding command: it logs into the server account, downloads encrypted vault metadata, verifies that the provided master password can unlock it locally, and only then saves the local token and metadata. With `--pull`, it immediately downloads the first batch of encrypted remote operations into the local inbox. With `--pull --apply-safe`, it also runs the same safe automatic apply path as `ltd sync apply`, leaving skipped and conflicting items in the inbox.
-When the server rejects the stored token because it is invalid or expired, sync commands now return a direct hint to run `ltd sync login` again.
+`ltd login` verifies the server is reachable through the login request, authenticates with an auth hash derived from the account email and master password, downloads encrypted vault metadata, and verifies that the master password can unlock it before saving local session state.
+`ltd logout` clears the local token and, unless `--local-only` is used, revokes the current server session first. `ltd logout --all` revokes every active server session for the current account and then clears the local token.
+When the server rejects the stored token because it is invalid or expired, sync commands now return a direct hint to run `ltd login` again.
 The client sends a session device id plus a best-effort device name on login/connect. Set `LEMONTODO_DEVICE_NAME` to override the inferred hostname.
 These commands prompt for the master password without echoing it to the terminal. This uses Argon2id to derive a server auth hash plus a wrapping key from the master password, decrypts the local vault key, and encrypts pending operations into sync objects.
 
