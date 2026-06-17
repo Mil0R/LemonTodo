@@ -144,6 +144,14 @@ impl App {
         &self.message
     }
 
+    pub fn set_message(&mut self, message: impl Into<String>) {
+        self.message = message.into();
+    }
+
+    pub fn store(&self) -> &TodoStore {
+        &self.store
+    }
+
     pub fn search_query(&self) -> &str {
         &self.search_query
     }

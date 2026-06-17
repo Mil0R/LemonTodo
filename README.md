@@ -201,13 +201,6 @@ ltd list --all
 ltd list --project LemonTodo --all
 ltd stats
 ltd search sync
-ltd edit <task-id-prefix> "Fix encrypted sync protocol notes"
-ltd note <task-id-prefix> "Markdown note"
-ltd due <task-id-prefix> 2026-06-30
-ltd due <task-id-prefix>
-ltd tags <task-id-prefix> sync mvp
-ltd done <task-id-prefix>
-ltd archive <task-id-prefix>
 ltd export ./lemontodo.snapshot.json
 ltd import ./lemontodo.snapshot.json
 ltd ops
@@ -218,8 +211,9 @@ ltd sync inbox
 ltd sync conflicts
 ltd logout
 ltd logout --all
-ltd move <task-id-prefix> LemonTodo
 ```
+
+Task editing commands are intended to be used inside the TUI. The old id-based root commands such as `ltd done`, `ltd edit`, `ltd note`, `ltd due`, `ltd tags`, `ltd move`, and `ltd archive` still exist for compatibility and scripts, but they are now hidden from the main CLI help.
 
 TUI controls:
 
@@ -238,11 +232,14 @@ TUI controls:
 - `c`: clear search
 - `x`: archive selected task
 - `s`: show or hide local sync status
+- `S`: run sync immediately
 - `?`: show or hide full help
 - `Enter`: submit task while adding
 - `Esc`: close help/sync status or cancel input mode
 - `r`: refresh
 - `q`: quit
+
+When a sync account is configured, opening the TUI prompts once for the master password to unlock auto-sync for the current session. Press Enter at that prompt to skip auto-sync. While unlocked, the TUI syncs on startup, after local edits with a short debounce, every 60 seconds while idle, and once before quit.
 
 ## Data Location
 
@@ -296,6 +293,8 @@ Initialize local vault metadata for low-level local dry-runs:
 ltd vault init
 ```
 
+`ltd vault` is now treated as a low-level compatibility command and hidden from the main CLI help.
+
 Inspect local sync state:
 
 ```bash
@@ -335,6 +334,7 @@ ltd sync apply
 `ltd sync resolve ... --keep-local` marks a conflict as ignored and keeps the local state unchanged.
 `ltd sync resolve ... --keep-remote` discards pending local task changes for that object and applies the remote version. This is currently limited to task conflicts.
 `ltd sync` pulls and saves remote operations first, applies safe operations by default, and then pushes local pending operations. Pulling first avoids advancing the local cursor past remote changes that this device has not seen yet.
+The TUI can use the same sync path automatically after a one-time per-session master password unlock. It does not store the master password or decrypted vault key after the process exits.
 `ltd sync status` shows the configured server account email, whether an access token is stored locally, whether local vault metadata exists, and when possible also fetches the current remote account/session view from the server.
 `ltd login` verifies the server is reachable through the login request, authenticates with an auth hash derived from the account email and master password, downloads encrypted vault metadata, and verifies that the master password can unlock it before saving local session state.
 `ltd logout` clears the local token and, unless `--local-only` is used, revokes the current server session first. `ltd logout --all` revokes every active server session for the current account and then clears the local token.

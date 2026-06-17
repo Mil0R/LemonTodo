@@ -1,7 +1,13 @@
 mod app;
 mod ui;
 
-use std::{collections::HashMap, fs, io, io::IsTerminal, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    fs, io,
+    io::IsTerminal,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::NaiveDate;
@@ -29,6 +35,9 @@ use crate::{
 };
 
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8787";
+const TUI_AUTO_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+const TUI_AUTO_SYNC_DEBOUNCE: Duration = Duration::from_secs(5);
+const TUI_AUTO_SYNC_LIMIT: u32 = 100;
 
 #[derive(Debug, Parser)]
 #[command(name = "ltd")]
@@ -74,20 +83,26 @@ enum Command {
     /// Search tasks locally.
     Search { query: String },
     /// Mark a task done by id prefix.
+    #[command(hide = true)]
     Done { id: String },
     /// Edit a task title by id prefix.
+    #[command(hide = true)]
     Edit { id: String, title: String },
     /// Edit a task note by id prefix.
+    #[command(hide = true)]
     Note { id: String, note: String },
     /// Set or clear a task due date by id prefix.
+    #[command(hide = true)]
     Due {
         id: String,
         #[arg(value_name = "YYYY-MM-DD")]
         date: Option<String>,
     },
     /// Replace task tags by id prefix.
+    #[command(hide = true)]
     Tags { id: String, tags: Vec<String> },
     /// Move a task to a project by id prefix.
+    #[command(hide = true)]
     Move { id: String, project: String },
     /// Export local data as JSON snapshot.
     Export {
@@ -139,11 +154,13 @@ enum Command {
         command: Option<SyncCommand>,
     },
     /// Manage the local encrypted vault metadata.
+    #[command(hide = true)]
     Vault {
         #[command(subcommand)]
         command: VaultCommand,
     },
     /// Archive a task by id prefix.
+    #[command(hide = true)]
     Archive { id: String },
 }
 
@@ -1089,14 +1106,24 @@ fn sync_now(
 ) -> Result<SyncNowSummary> {
     let server_url = configured_server_url(store, server_url)?;
     let vault_key = load_vault_key(store, key, master_password)?;
-    let pulled = pull_remote_operations_with_vault_key(store, &vault_key, &server_url, limit)?;
+    sync_now_with_vault_key(store, &vault_key, &server_url, limit, apply_safe)
+}
+
+fn sync_now_with_vault_key(
+    store: &TodoStore,
+    vault_key: &VaultKey,
+    server_url: &str,
+    limit: u32,
+    apply_safe: bool,
+) -> Result<SyncNowSummary> {
+    let pulled = pull_remote_operations_with_vault_key(store, vault_key, server_url, limit)?;
     let saved = store.save_remote_operations(&pulled.operations, &pulled.cursor)?;
     let applied = if apply_safe {
         Some(store.apply_pending_remote_operations()?)
     } else {
         None
     };
-    let pushed = push_pending_operations_with_vault_key(store, &vault_key, &server_url)?;
+    let pushed = push_pending_operations_with_vault_key(store, vault_key, server_url)?;
 
     Ok(SyncNowSummary {
         pulled,
@@ -1719,6 +1746,34 @@ fn import_remote_vault_metadata(
     Ok(())
 }
 
+fn unlock_tui_auto_sync(store: &TodoStore) -> Result<Option<VaultKey>> {
+    if store.sync_server_url()?.is_none()
+        || store.sync_access_token()?.is_none()
+        || store.encrypted_vault_key()?.is_none()
+        || !io::stdin().is_terminal()
+    {
+        return Ok(None);
+    }
+
+    let master_password =
+        prompt_master_password("Master password for TUI auto-sync (empty skips): ")?;
+    if master_password.is_empty() {
+        println!("TUI auto-sync disabled");
+        return Ok(None);
+    }
+
+    let encrypted = store
+        .encrypted_vault_key()?
+        .context("local vault metadata is not initialized; run ltd login first")?;
+    match unwrap_vault_key(&encrypted, &master_password) {
+        Ok(vault_key) => Ok(Some(vault_key)),
+        Err(error) => {
+            println!("TUI auto-sync disabled: {error}");
+            Ok(None)
+        }
+    }
+}
+
 fn load_vault_key(
     store: &TodoStore,
     key: Option<&str>,
@@ -1853,13 +1908,14 @@ mod tests {
 }
 
 fn run_tui(store: TodoStore) -> Result<()> {
+    let tui_vault_key = unlock_tui_auto_sync(&store)?;
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, App::new(store)?);
+    let result = run_app(&mut terminal, App::new(store)?, tui_vault_key);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -1868,7 +1924,104 @@ fn run_tui(store: TodoStore) -> Result<()> {
     result
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<()> {
+struct AutoSync {
+    vault_key: Option<VaultKey>,
+    last_attempt: Option<Instant>,
+    dirty_since: Option<Instant>,
+}
+
+impl AutoSync {
+    fn new(vault_key: Option<VaultKey>) -> Self {
+        Self {
+            vault_key,
+            last_attempt: None,
+            dirty_since: None,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.vault_key.is_some()
+    }
+
+    fn mark_dirty(&mut self) {
+        if self.enabled() && self.dirty_since.is_none() {
+            self.dirty_since = Some(Instant::now());
+        }
+    }
+
+    fn should_sync(&self, now: Instant, mode: Mode) -> bool {
+        if !self.enabled() || mode != Mode::Browse {
+            return false;
+        }
+        if let Some(dirty_since) = self.dirty_since
+            && now.duration_since(dirty_since) >= TUI_AUTO_SYNC_DEBOUNCE
+        {
+            return true;
+        }
+        self.last_attempt
+            .map(|last| now.duration_since(last) >= TUI_AUTO_SYNC_INTERVAL)
+            .unwrap_or(true)
+    }
+
+    fn vault_key(&self) -> Option<&VaultKey> {
+        self.vault_key.as_ref()
+    }
+
+    fn finish_attempt(&mut self, now: Instant, success: bool) {
+        self.last_attempt = Some(now);
+        if success {
+            self.dirty_since = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyOutcome {
+    quit: bool,
+    changed: bool,
+    force_sync: bool,
+}
+
+impl KeyOutcome {
+    fn none() -> Self {
+        Self {
+            quit: false,
+            changed: false,
+            force_sync: false,
+        }
+    }
+
+    fn quit() -> Self {
+        Self {
+            quit: true,
+            changed: false,
+            force_sync: false,
+        }
+    }
+
+    fn changed() -> Self {
+        Self {
+            quit: false,
+            changed: true,
+            force_sync: false,
+        }
+    }
+
+    fn force_sync() -> Self {
+        Self {
+            quit: false,
+            changed: false,
+            force_sync: true,
+        }
+    }
+}
+
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mut app: App,
+    tui_vault_key: Option<VaultKey>,
+) -> Result<()> {
+    let mut auto_sync = AutoSync::new(tui_vault_key);
     loop {
         terminal.draw(|frame| draw(frame, &app))?;
 
@@ -1880,26 +2033,83 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
                 continue;
             }
 
-            if handle_key(key, &mut app)? {
+            let outcome = handle_key(key, &mut app)?;
+            if outcome.changed {
+                auto_sync.mark_dirty();
+            }
+            if outcome.force_sync {
+                run_tui_sync(&mut app, &mut auto_sync, "sync")?;
+            }
+            if outcome.quit {
+                run_tui_sync(&mut app, &mut auto_sync, "final sync")?;
                 return Ok(());
             }
+        }
+
+        if auto_sync.should_sync(Instant::now(), app.mode()) {
+            run_tui_sync(&mut app, &mut auto_sync, "auto-sync")?;
         }
     }
 }
 
-fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
+fn run_tui_sync(app: &mut App, auto_sync: &mut AutoSync, label: &str) -> Result<()> {
+    let Some(vault_key) = auto_sync.vault_key().cloned() else {
+        app.set_message("sync: locked");
+        return Ok(());
+    };
+    app.set_message(format!("{label}: syncing..."));
+    let now = Instant::now();
+    let server_url = configured_server_url(app.store(), None)?;
+    match sync_now_with_vault_key(
+        app.store(),
+        &vault_key,
+        &server_url,
+        TUI_AUTO_SYNC_LIMIT,
+        true,
+    ) {
+        Ok(summary) => {
+            app.refresh()?;
+            app.set_message(sync_summary_message(label, &summary));
+            auto_sync.finish_attempt(now, true);
+        }
+        Err(error) => {
+            app.set_message(format!("{label}: failed: {error}"));
+            auto_sync.finish_attempt(now, false);
+        }
+    }
+    Ok(())
+}
+
+fn sync_summary_message(label: &str, summary: &SyncNowSummary) -> String {
+    format!(
+        "{label}: ok pulled {} saved {} pushed {} conflicts {}",
+        summary.pulled.operations.len(),
+        summary.saved,
+        summary.pushed.accepted,
+        summary
+            .applied
+            .as_ref()
+            .map(|applied| applied.conflicts)
+            .unwrap_or(0)
+    )
+}
+
+fn handle_key(key: KeyEvent, app: &mut App) -> Result<KeyOutcome> {
     match app.mode() {
         Mode::Browse => match key.code {
             KeyCode::Esc if app.help_visible() => app.hide_help(),
             KeyCode::Esc if app.sync_status_visible() => app.hide_sync_status(),
             KeyCode::Char('?') => app.toggle_help(),
-            KeyCode::Char('q') => return Ok(true),
+            KeyCode::Char('q') => return Ok(KeyOutcome::quit()),
             KeyCode::Char('j') | KeyCode::Down => app.move_down(),
             KeyCode::Char('k') | KeyCode::Up => app.move_up(),
             KeyCode::Char('[') => app.previous_project()?,
             KeyCode::Char(']') => app.next_project()?,
             KeyCode::Char('v') => app.toggle_view_mode(),
-            KeyCode::Char(' ') => app.toggle_selected()?,
+            KeyCode::Char(' ') => {
+                app.toggle_selected()?;
+                return Ok(KeyOutcome::changed());
+            }
             KeyCode::Char('a') => app.start_add(),
             KeyCode::Char('e') => app.start_edit_title(),
             KeyCode::Char('n') => app.start_edit_note(),
@@ -1908,8 +2118,12 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
             KeyCode::Char('m') => app.start_move_project(),
             KeyCode::Char('/') => app.start_search(),
             KeyCode::Char('c') => app.clear_search()?,
-            KeyCode::Char('x') => app.archive_selected()?,
+            KeyCode::Char('x') => {
+                app.archive_selected()?;
+                return Ok(KeyOutcome::changed());
+            }
             KeyCode::Char('s') => app.toggle_sync_status()?,
+            KeyCode::Char('S') => return Ok(KeyOutcome::force_sync()),
             KeyCode::Char('r') => {
                 app.refresh()?;
             }
@@ -1923,14 +2137,20 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<bool> {
         | Mode::MoveProject
         | Mode::Search => match key.code {
             KeyCode::Esc => app.cancel_input(),
-            KeyCode::Enter => app.submit_input()?,
+            KeyCode::Enter => {
+                let mode = app.mode();
+                app.submit_input()?;
+                if mode != Mode::Search {
+                    return Ok(KeyOutcome::changed());
+                }
+            }
             KeyCode::Backspace => app.pop_input(),
             KeyCode::Char(value) => app.push_input(value),
             _ => {}
         },
     }
 
-    Ok(false)
+    Ok(KeyOutcome::none())
 }
 
 fn print_tasks(tasks: Vec<Task>) -> Result<()> {

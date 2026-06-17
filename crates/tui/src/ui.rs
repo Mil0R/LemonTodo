@@ -10,78 +10,69 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Mode, SyncStatus, ViewMode};
 
-const SHORT_HELP: &str = "j/k select  space toggle  a add  e edit  m move  s sync  ? help  q quit";
 const READY_MESSAGE: &str = "Ready";
-const PROJECT_CELL_WIDTH: usize = 28;
-const VIEW_CELL_WIDTH: usize = 13;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Viewport {
+    Phone,
+    Tablet,
+    Desktop,
+}
 
 pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
+    if area.width < 32 || area.height < 10 {
+        draw_too_small(frame, area);
+        return;
+    }
+
+    let viewport = viewport_for(area.width);
+    let header_lines = header_lines(app, viewport);
+    let footer_lines = footer_lines(app, viewport);
+    let header_height = block_height(&header_lines);
+    let footer_height = block_height(&footer_lines);
+
+    if area.height <= header_height + footer_height {
+        draw_too_small(frame, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(header_height),
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(footer_height),
         ])
         .split(area);
 
-    draw_header(frame, chunks[0], app);
-    draw_tasks(frame, chunks[1], app);
-    draw_footer(frame, chunks[2], app);
+    draw_header(frame, chunks[0], &header_lines);
+    draw_tasks(frame, chunks[1], app, viewport);
+    draw_footer(frame, chunks[2], app, &footer_lines);
 
     if app.help_visible() {
-        draw_help(frame, area);
+        draw_help(frame, area, viewport);
     }
 
     if app.sync_status_visible() {
-        draw_sync_status(frame, area, app.sync_status());
+        draw_sync_status(frame, area, viewport, app.sync_status());
     }
 
     if app.mode() != Mode::Browse {
-        let input_width = UnicodeWidthStr::width(app.input()) as u16;
-        frame.set_cursor_position((chunks[2].x + input_width + 1, chunks[2].y + 1));
-    }
-
-    if area.width < 60 || area.height < 12 {
-        let popup = centered_rect(80, 40, area);
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new("Terminal is too small")
-                .alignment(Alignment::Center)
-                .block(Block::default().borders(Borders::ALL)),
-            popup,
-        );
+        let cursor_x = chunks[2].x + 1 + footer_input_offset(app.input());
+        let cursor_y = chunks[2].y + footer_input_row(viewport);
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
 }
 
-fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let project = fixed_cell(
-        &format!("project: {}", app.current_project_name()),
-        PROJECT_CELL_WIDTH,
-    );
-    let view = fixed_cell(&format!("view: {}", app.view_mode_name()), VIEW_CELL_WIDTH);
-    let filter = if app.search_query().is_empty() {
-        String::new()
-    } else {
-        format!("  filter: {}", truncate_to_width(app.search_query(), 24))
-    };
-
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled("LemonTodo", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(project, Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(view, Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  |  "),
-        Span::styled(SHORT_HELP, Style::default().add_modifier(Modifier::DIM)),
-        Span::styled(filter, Style::default().add_modifier(Modifier::ITALIC)),
-    ]))
-    .block(Block::default().borders(Borders::ALL));
-    frame.render_widget(title, area);
+fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, lines: &[Line<'_>]) {
+    let header = Paragraph::new(lines.to_vec())
+        .block(Block::default().borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(header, area);
 }
 
-fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, viewport: Viewport) {
     let items = if app.tasks().is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "No tasks. Press 'a' to add one.",
@@ -96,6 +87,7 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                     app.project_name_for_task(task),
                     app.view_mode(),
                     app.shows_all_projects(),
+                    viewport,
                 )
             })
             .collect()
@@ -113,76 +105,124 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 .add_modifier(Modifier::REVERSED)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("> ");
+        .highlight_symbol(match viewport {
+            Viewport::Phone => ">",
+            Viewport::Tablet | Viewport::Desktop => "> ",
+        });
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let footer = match app.mode() {
-        Mode::Browse => {
-            let text = if app.message().is_empty() {
-                READY_MESSAGE
-            } else {
-                app.message()
-            };
-            Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL))
-                .wrap(Wrap { trim: true })
-        }
-        Mode::Add => input_footer("New task", app.input()),
-        Mode::EditTitle => input_footer("Edit title", app.input()),
-        Mode::EditNote => input_footer("Edit note", app.input()),
-        Mode::EditDue => input_footer("Edit due YYYY-MM-DD, empty clears", app.input()),
-        Mode::EditTags => input_footer("Edit tags", app.input()),
-        Mode::MoveProject => input_footer("Move to project", app.input()),
-        Mode::Search => input_footer("Search", app.input()),
-    };
+fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, lines: &[Line<'_>]) {
+    let title = footer_title(app.mode(), app.message(), app.search_query(), app.input());
+    let footer = Paragraph::new(lines.to_vec())
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .wrap(Wrap { trim: true });
     frame.render_widget(footer, area);
 }
 
-fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
-    let popup = centered_rect(74, 76, area);
+fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, viewport: Viewport) {
+    let popup = popup_rect(area, viewport);
     frame.render_widget(Clear, popup);
 
-    let lines = vec![
-        Line::from(vec![Span::styled(
-            "Navigation",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  j/k, Up/Down   select task"),
-        Line::from("  [, ]           switch project"),
-        Line::from("  v              compact/detail view"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Task",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  space          toggle done/open"),
-        Line::from("  a              add task"),
-        Line::from("  e              edit title"),
-        Line::from("  n              edit note"),
-        Line::from("  d              edit due date"),
-        Line::from("  t              edit tags"),
-        Line::from("  m              move to project"),
-        Line::from("  x              archive"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "Search",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  /              search"),
-        Line::from("  c              clear search"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "System",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("  r              refresh"),
-        Line::from("  s              sync status"),
-        Line::from("  ?              toggle this help"),
-        Line::from("  Esc            close help"),
-        Line::from("  q              quit"),
-    ];
+    let lines = match viewport {
+        Viewport::Phone => vec![
+            Line::from(vec![Span::styled(
+                "Move",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("j/k or arrows  select"),
+            Line::from("[ ]           project"),
+            Line::from("v             view"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Task",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("space         toggle"),
+            Line::from("a e n d t     add/edit"),
+            Line::from("m x           move/archive"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Search",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("/  search"),
+            Line::from("c  clear"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "System",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("s sync panel"),
+            Line::from("S sync now"),
+            Line::from("? help"),
+            Line::from("Esc close"),
+            Line::from("q quit"),
+        ],
+        Viewport::Tablet => vec![
+            Line::from(vec![Span::styled(
+                "Navigation",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("j/k or Up/Down  select task    [ / ]  switch project    v  compact/detail"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Task",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(
+                "space toggle   a add   e title   n note   d due   t tags   m move   x archive",
+            ),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Search + System",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(
+                "/ search   c clear   r refresh   s status   S sync now   ? help   Esc close   q quit",
+            ),
+        ],
+        Viewport::Desktop => vec![
+            Line::from(vec![Span::styled(
+                "Navigation",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  j/k, Up/Down   select task"),
+            Line::from("  [, ]           switch project"),
+            Line::from("  v              compact/detail view"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Task",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  space          toggle done/open"),
+            Line::from("  a              add task"),
+            Line::from("  e              edit title"),
+            Line::from("  n              edit note"),
+            Line::from("  d              edit due date"),
+            Line::from("  t              edit tags"),
+            Line::from("  m              move to project"),
+            Line::from("  x              archive"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Search",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  /              search"),
+            Line::from("  c              clear search"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "System",
+                Style::default().add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  r              refresh"),
+            Line::from("  s              sync status"),
+            Line::from("  S              sync now"),
+            Line::from("  ?              toggle this help"),
+            Line::from("  Esc            close help"),
+            Line::from("  q              quit"),
+        ],
+    };
 
     let help = Paragraph::new(lines)
         .block(Block::default().title("Help").borders(Borders::ALL))
@@ -190,59 +230,96 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
     frame.render_widget(help, popup);
 }
 
-fn draw_sync_status(frame: &mut ratatui::Frame<'_>, area: Rect, status: Option<&SyncStatus>) {
-    let popup = centered_rect(72, 48, area);
+fn draw_sync_status(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    viewport: Viewport,
+    status: Option<&SyncStatus>,
+) {
+    let popup = popup_rect(area, viewport);
     frame.render_widget(Clear, popup);
 
     let lines = if let Some(status) = status {
-        vec![
-            Line::from(vec![Span::styled(
-                "Local",
-                Style::default().add_modifier(Modifier::BOLD),
-            )]),
-            status_line(
-                "server",
-                status.server.as_deref().unwrap_or("<not configured>"),
-            ),
-            status_line(
-                "account",
-                status.account.as_deref().unwrap_or("<not configured>"),
-            ),
-            status_line(
-                "access token",
-                if status.access_token_configured {
-                    "configured"
-                } else {
-                    "<not configured>"
-                },
-            ),
-            status_line(
-                "vault metadata",
-                if status.vault_metadata_configured {
-                    "configured"
-                } else {
-                    "<not initialized>"
-                },
-            ),
-            Line::from(""),
-            Line::from(vec![Span::styled(
-                "Queue",
-                Style::default().add_modifier(Modifier::BOLD),
-            )]),
-            status_line(
-                "pending local ops",
-                status.pending_local_operations.to_string(),
-            ),
-            status_line(
-                "pending remote ops",
-                status.pending_remote_operations.to_string(),
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Esc closes this panel",
-                Style::default().add_modifier(Modifier::DIM),
-            )),
-        ]
+        match viewport {
+            Viewport::Phone => vec![
+                sync_section("Local"),
+                compact_status_line(
+                    "server",
+                    status.server.as_deref().unwrap_or("<not configured>"),
+                ),
+                compact_status_line(
+                    "account",
+                    status.account.as_deref().unwrap_or("<not configured>"),
+                ),
+                compact_status_line(
+                    "token",
+                    if status.access_token_configured {
+                        "configured"
+                    } else {
+                        "<not configured>"
+                    },
+                ),
+                compact_status_line(
+                    "vault",
+                    if status.vault_metadata_configured {
+                        "configured"
+                    } else {
+                        "<not initialized>"
+                    },
+                ),
+                Line::from(""),
+                sync_section("Queue"),
+                compact_status_line("local ops", status.pending_local_operations.to_string()),
+                compact_status_line("remote ops", status.pending_remote_operations.to_string()),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Esc closes this panel",
+                    Style::default().add_modifier(Modifier::DIM),
+                )),
+            ],
+            Viewport::Tablet | Viewport::Desktop => vec![
+                sync_section("Local"),
+                status_line(
+                    "server",
+                    status.server.as_deref().unwrap_or("<not configured>"),
+                ),
+                status_line(
+                    "account",
+                    status.account.as_deref().unwrap_or("<not configured>"),
+                ),
+                status_line(
+                    "access token",
+                    if status.access_token_configured {
+                        "configured"
+                    } else {
+                        "<not configured>"
+                    },
+                ),
+                status_line(
+                    "vault metadata",
+                    if status.vault_metadata_configured {
+                        "configured"
+                    } else {
+                        "<not initialized>"
+                    },
+                ),
+                Line::from(""),
+                sync_section("Queue"),
+                status_line(
+                    "pending local ops",
+                    status.pending_local_operations.to_string(),
+                ),
+                status_line(
+                    "pending remote ops",
+                    status.pending_remote_operations.to_string(),
+                ),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Esc closes this panel",
+                    Style::default().add_modifier(Modifier::DIM),
+                )),
+            ],
+        }
     } else {
         vec![Line::from("Sync status is not loaded")]
     };
@@ -251,6 +328,23 @@ fn draw_sync_status(frame: &mut ratatui::Frame<'_>, area: Rect, status: Option<&
         .block(Block::default().title("Sync Status").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
     frame.render_widget(status, popup);
+}
+
+fn sync_section<'a>(title: &'a str) -> Line<'a> {
+    Line::from(vec![Span::styled(
+        title,
+        Style::default().add_modifier(Modifier::BOLD),
+    )])
+}
+
+fn compact_status_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label}: "),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(value.into()),
+    ])
 }
 
 fn status_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
@@ -263,38 +357,199 @@ fn status_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
     ])
 }
 
-fn input_footer<'a>(title: &'a str, input: &'a str) -> Paragraph<'a> {
-    Paragraph::new(input).block(Block::default().title(title).borders(Borders::ALL))
-}
-
-fn fixed_cell(value: &str, width: usize) -> String {
-    let fitted = truncate_to_width(value, width);
-    let padding = width.saturating_sub(UnicodeWidthStr::width(fitted.as_str()));
-    format!("{fitted}{}", " ".repeat(padding))
-}
-
-fn truncate_to_width(value: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(value) <= width {
-        return value.to_owned();
-    }
-
-    let ellipsis = "...";
-    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
-    let target_width = width.saturating_sub(ellipsis_width);
-    let mut output = String::new();
-    let mut used_width = 0;
-
-    for value in value.chars() {
-        let char_width = UnicodeWidthChar::width(value).unwrap_or(0);
-        if used_width + char_width > target_width {
-            break;
+fn footer_title<'a>(
+    mode: Mode,
+    message: &'a str,
+    search_query: &'a str,
+    _input: &'a str,
+) -> &'a str {
+    match mode {
+        Mode::Browse => {
+            if !message.is_empty() {
+                message
+            } else if !search_query.is_empty() {
+                "Search"
+            } else {
+                READY_MESSAGE
+            }
         }
-        output.push(value);
-        used_width += char_width;
+        Mode::Add => "New task",
+        Mode::EditTitle => "Edit title",
+        Mode::EditNote => "Edit note",
+        Mode::EditDue => "Edit due YYYY-MM-DD, empty clears",
+        Mode::EditTags => "Edit tags",
+        Mode::MoveProject => "Move to project",
+        Mode::Search => "Search",
     }
+}
 
-    output.push_str(ellipsis);
-    output
+fn header_lines(app: &App, viewport: Viewport) -> Vec<Line<'static>> {
+    let title = Span::styled("LemonTodo", Style::default().add_modifier(Modifier::BOLD));
+    let project = app.current_project_name().to_owned();
+    let view = app.view_mode_name().to_owned();
+    let filter = app.search_query().to_owned();
+
+    match viewport {
+        Viewport::Phone => {
+            let mut lines = vec![
+                Line::from(vec![
+                    title,
+                    Span::raw("  "),
+                    Span::styled(
+                        truncate_to_width(&format!("project: {project}"), 18),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        format!("view: {view}"),
+                        Style::default().add_modifier(Modifier::DIM),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        "a add  e edit  S sync  ? help",
+                        Style::default().add_modifier(Modifier::DIM),
+                    ),
+                ]),
+            ];
+            if !filter.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("filter: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled(
+                        truncate_to_width(&filter, 24),
+                        Style::default().add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
+            lines
+        }
+        Viewport::Tablet => {
+            let mut lines = vec![
+                Line::from(vec![
+                    title,
+                    Span::raw("  "),
+                    Span::styled(
+                        truncate_to_width(&format!("project: {project}"), 30),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("view: {view}"),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![Span::styled(
+                    "j/k move  [ ] project  space toggle  a add  e edit  S sync  ? help",
+                    Style::default().add_modifier(Modifier::DIM),
+                )]),
+            ];
+            if !filter.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("filter: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled(
+                        truncate_to_width(&filter, 48),
+                        Style::default().add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
+            lines
+        }
+        Viewport::Desktop => {
+            let mut lines = vec![Line::from(vec![
+                title,
+                Span::raw("  "),
+                Span::styled(
+                    fixed_cell(&format!("project: {project}"), 28),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    fixed_cell(&format!("view: {view}"), 13),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  |  "),
+                Span::styled(
+                    "j/k select  space toggle  a add  e edit  S sync  s status  ? help  q quit",
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+            ])];
+            if !filter.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("filter: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled(
+                        truncate_to_width(&filter, 72),
+                        Style::default().add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+            }
+            lines
+        }
+    }
+}
+
+fn footer_lines(app: &App, viewport: Viewport) -> Vec<Line<'static>> {
+    match app.mode() {
+        Mode::Browse => {
+            let text = if app.message().is_empty() {
+                READY_MESSAGE
+            } else {
+                app.message()
+            };
+            wrap_text_lines(
+                text,
+                match viewport {
+                    Viewport::Phone => 30,
+                    Viewport::Tablet => 60,
+                    Viewport::Desktop => 96,
+                },
+            )
+        }
+        mode => input_lines(mode, app.input(), viewport),
+    }
+}
+
+fn input_lines(mode: Mode, input: &str, viewport: Viewport) -> Vec<Line<'static>> {
+    let hint = match mode {
+        Mode::Add => "Enter saves. Esc cancels.",
+        Mode::EditTitle => "Enter saves. Esc cancels.",
+        Mode::EditNote => "Enter saves. Esc cancels.",
+        Mode::EditDue => "YYYY-MM-DD. Empty clears.",
+        Mode::EditTags => "Use spaces or commas.",
+        Mode::MoveProject => "Type exact project name.",
+        Mode::Search => "Enter applies search. Esc cancels.",
+        Mode::Browse => "",
+    };
+    match viewport {
+        Viewport::Phone => vec![
+            Line::from(Span::styled(
+                hint,
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+            Line::from(input.to_owned()),
+        ],
+        Viewport::Tablet | Viewport::Desktop => {
+            let mut lines = vec![Line::from(input.to_owned())];
+            if !hint.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    hint,
+                    Style::default().add_modifier(Modifier::DIM),
+                )));
+            }
+            lines
+        }
+    }
+}
+
+fn footer_input_row(viewport: Viewport) -> u16 {
+    match viewport {
+        Viewport::Phone => 2,
+        Viewport::Tablet | Viewport::Desktop => 1,
+    }
+}
+
+fn footer_input_offset(input: &str) -> u16 {
+    let width = UnicodeWidthStr::width(input);
+    width.min(u16::MAX as usize) as u16
 }
 
 fn task_item<'a>(
@@ -302,12 +557,121 @@ fn task_item<'a>(
     project_name: &'a str,
     view_mode: ViewMode,
     show_project: bool,
+    viewport: Viewport,
 ) -> ListItem<'a> {
-    let marker = match task.status {
-        TaskStatus::Open => "[ ]",
-        TaskStatus::Done => "[x]",
-        TaskStatus::Archived => "[-]",
+    match viewport {
+        Viewport::Phone => task_item_phone(task, project_name, view_mode, show_project),
+        Viewport::Tablet => task_item_tablet(task, project_name, view_mode, show_project),
+        Viewport::Desktop => task_item_desktop(task, project_name, view_mode, show_project),
+    }
+}
+
+fn task_item_phone<'a>(
+    task: &'a Task,
+    project_name: &'a str,
+    view_mode: ViewMode,
+    show_project: bool,
+) -> ListItem<'a> {
+    let marker = task_marker(task.status);
+    let title_style = task_style(task.status);
+    let meta_style = Style::default().add_modifier(Modifier::DIM);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(marker, title_style),
+        Span::raw(" "),
+        Span::styled(task.title.clone(), title_style),
+    ])];
+
+    let mut meta = Vec::new();
+    if show_project {
+        meta.push(format!("@{project_name}"));
+    }
+    if let Some(due) = task.due_date {
+        meta.push(format!("due {due}"));
+    }
+    if !task.tags.is_empty() {
+        meta.push(
+            task.tags
+                .iter()
+                .map(|tag| format!("#{tag}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
+    if !meta.is_empty() {
+        lines.push(Line::from(Span::styled(meta.join("  "), meta_style)));
+    }
+    if view_mode == ViewMode::Detail {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "id {}  updated {}",
+                short_uuid(&task.id.to_string()),
+                format_short_time(task.updated_at)
+            ),
+            meta_style,
+        )));
+    }
+    ListItem::new(lines)
+}
+
+fn task_item_tablet<'a>(
+    task: &'a Task,
+    project_name: &'a str,
+    view_mode: ViewMode,
+    show_project: bool,
+) -> ListItem<'a> {
+    let marker = task_marker(task.status);
+    let due = task
+        .due_date
+        .map(|date| format!(" due:{date}"))
+        .unwrap_or_default();
+    let tags = if task.tags.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            task.tags
+                .iter()
+                .map(|tag| format!("#{tag}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
     };
+    let task_style = task_style(task.status);
+    let meta_style = Style::default().add_modifier(Modifier::DIM);
+    let project = if show_project {
+        format!(" @{project_name}")
+    } else {
+        String::new()
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(marker, task_style),
+        Span::raw(" "),
+        Span::styled(task.title.clone(), task_style),
+        Span::styled(project, meta_style),
+        Span::styled(due, meta_style),
+        Span::styled(tags, meta_style),
+    ])];
+    if view_mode == ViewMode::Detail {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "id {}  created {}  updated {}",
+                short_uuid(&task.id.to_string()),
+                format_short_time(task.created_at),
+                format_short_time(task.updated_at)
+            ),
+            meta_style,
+        )));
+    }
+    ListItem::new(lines)
+}
+
+fn task_item_desktop<'a>(
+    task: &'a Task,
+    project_name: &'a str,
+    view_mode: ViewMode,
+    show_project: bool,
+) -> ListItem<'a> {
+    let marker = task_marker(task.status);
     let due = task
         .due_date
         .map(|date| format!(" due:{date}"))
@@ -325,10 +689,7 @@ fn task_item<'a>(
         )
     };
 
-    let task_style = match task.status {
-        TaskStatus::Open => Style::default(),
-        TaskStatus::Done | TaskStatus::Archived => Style::default().add_modifier(Modifier::DIM),
-    };
+    let task_style = task_style(task.status);
     let meta_style = Style::default().add_modifier(Modifier::DIM);
 
     let project = if show_project {
@@ -391,11 +752,34 @@ fn task_item<'a>(
     }
 }
 
+fn task_marker(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Open => "[ ]",
+        TaskStatus::Done => "[x]",
+        TaskStatus::Archived => "[-]",
+    }
+}
+
+fn task_style(status: TaskStatus) -> Style {
+    match status {
+        TaskStatus::Open => Style::default(),
+        TaskStatus::Done | TaskStatus::Archived => Style::default().add_modifier(Modifier::DIM),
+    }
+}
+
 fn project_detail<'a>(project_name: &'a str, show_project: bool, meta_style: Style) -> Span<'a> {
     if show_project {
         Span::styled(format!("  project: {project_name}  "), meta_style)
     } else {
         Span::raw("  ")
+    }
+}
+
+fn popup_rect(area: Rect, viewport: Viewport) -> Rect {
+    match viewport {
+        Viewport::Phone => centered_rect(94, 88, area),
+        Viewport::Tablet => centered_rect(88, 76, area),
+        Viewport::Desktop => centered_rect(74, 76, area),
     }
 }
 
@@ -419,6 +803,125 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+fn draw_too_small(frame: &mut ratatui::Frame<'_>, area: Rect) {
+    let popup = centered_rect(92, 56, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("Terminal is too small"),
+            Line::from("Use at least 32x10"),
+        ])
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL)),
+        popup,
+    );
+}
+
+fn block_height(lines: &[Line<'_>]) -> u16 {
+    (lines.len() as u16).saturating_add(2).max(3)
+}
+
+fn viewport_for(width: u16) -> Viewport {
+    if width < 64 {
+        Viewport::Phone
+    } else if width < 108 {
+        Viewport::Tablet
+    } else {
+        Viewport::Desktop
+    }
+}
+
+fn wrap_text_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for word in text.split_whitespace() {
+        let word_width = UnicodeWidthStr::width(word);
+        let separator = if current.is_empty() { 0 } else { 1 };
+        if current_width + separator + word_width > width && !current.is_empty() {
+            lines.push(Line::from(std::mem::take(&mut current)));
+            current_width = 0;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+            current_width += 1;
+        }
+        current.push_str(word);
+        current_width += word_width;
+    }
+
+    if current.is_empty() {
+        vec![Line::from(text.to_owned())]
+    } else {
+        lines.push(Line::from(current));
+        lines
+    }
+}
+
+fn fixed_cell(value: &str, width: usize) -> String {
+    let fitted = truncate_to_width(value, width);
+    let padding = width.saturating_sub(UnicodeWidthStr::width(fitted.as_str()));
+    format!("{fitted}{}", " ".repeat(padding))
+}
+
+fn truncate_to_width(value: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= width {
+        return value.to_owned();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    let target_width = width.saturating_sub(ellipsis_width);
+    let mut output = String::new();
+    let mut used_width = 0;
+
+    for value in value.chars() {
+        let char_width = UnicodeWidthChar::width(value).unwrap_or(0);
+        if used_width + char_width > target_width {
+            break;
+        }
+        output.push(value);
+        used_width += char_width;
+    }
+
+    output.push_str(ellipsis);
+    output
+}
+
 fn format_time(value: DateTime<Utc>) -> String {
     value.format("%Y-%m-%d %H:%MZ").to_string()
+}
+
+fn format_short_time(value: DateTime<Utc>) -> String {
+    value.format("%m-%d %H:%MZ").to_string()
+}
+
+fn short_uuid(value: &str) -> &str {
+    value.get(..8).unwrap_or(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_viewport_breakpoints() {
+        assert_eq!(viewport_for(40), Viewport::Phone);
+        assert_eq!(viewport_for(80), Viewport::Tablet);
+        assert_eq!(viewport_for(120), Viewport::Desktop);
+    }
+
+    #[test]
+    fn truncates_with_ellipsis_for_unicode_width() {
+        let truncated = truncate_to_width("project: 长名字长名字长名字", 12);
+        assert!(UnicodeWidthStr::width(truncated.as_str()) <= 12);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn wraps_long_messages_into_multiple_lines() {
+        let lines = wrap_text_lines("sync completed with remote updates waiting to apply", 18);
+        assert!(lines.len() >= 2);
+    }
 }
