@@ -4,6 +4,7 @@
 
 ```text
 TUI client
+Web client
 React Native client later
   |
   v
@@ -38,6 +39,7 @@ crates/core      model, sync state, merge logic
 crates/crypto    E2EE envelope and key handling
 crates/sync      protocol client and server-neutral sync logic
 crates/tui       terminal UI
+apps/web         browser client for project/task workflows
 crates/server    self-hosted sync server
 apps/mobile      future React Native shell
 docs/            product, architecture, protocol, licensing
@@ -59,6 +61,7 @@ Required boundaries inside the monorepo:
 - server implementation
 - client implementations
 - end-to-end compatibility tests
+- browser-friendly session auth and sync behavior
 
 Future repository splits may be considered only after:
 
@@ -75,6 +78,7 @@ lemontodo-protocol
 lemontodo-core
 lemontodo-server
 lemontodo-tui
+lemontodo-web
 lemontodo-mobile
 lemontodo-commercial
 ```
@@ -267,6 +271,34 @@ MVP CLI mapping:
 5. `ltd sync apply` remains available as an explicit follow-up step.
 
 Forgotten master password cannot be recovered by the server.
+
+## Web Client Sync Model
+
+The Web client should reuse the same sync semantics as the TUI, but through browser lifecycle hooks instead of a terminal event loop.
+
+Recommended session flow:
+
+1. User opens the Web client.
+2. If server URL, account email, access token, and encrypted vault metadata are already configured, the client prompts once for the master password to unlock auto-sync for the current session.
+3. While unlocked, the client syncs on first load, after local edits with a short debounce, on a fixed interval while the tab is active, on `visibilitychange` when returning to the foreground, and once before unload.
+4. If the user skips unlock, the client still allows manual sync and login/logout.
+
+Recommended client-side state:
+
+- current project
+- selected task
+- draft input state
+- sync status
+- dirty flag
+- unlocked session vault key, kept only in memory
+
+Recommended browser events:
+
+- `visibilitychange` for foreground refresh
+- `beforeunload` for a final push attempt
+- `online` for retrying after network recovery
+
+Do not implement a background service worker for MVP sync. The first browser version should be session-scoped and explicit.
 
 ## Self-Hosted Server
 

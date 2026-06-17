@@ -6,7 +6,7 @@ This file guides coding agents working on LemonTodo.
 
 LemonTodo is a developer-first, local-first, end-to-end encrypted Todo app.
 
-The first user interface is a terminal TUI. A React Native app may be added later, but business logic must remain in a shared core.
+The first user interface is a terminal TUI. A Web client is a supported second surface for project/task workflows. A React Native app may be added later, but business logic must remain in a shared core.
 
 Do not expand the MVP into a general notes app, project-management suite, Notion clone, or Joplin clone.
 
@@ -36,6 +36,7 @@ crates/core
 crates/crypto
 crates/sync
 crates/tui
+apps/web
 crates/server
 apps/mobile
 docs
@@ -59,6 +60,7 @@ Implement first:
 - Conflict view.
 - Admin bootstrap for self-hosted server.
 - Registration policy controlled by environment/config.
+- Web client for project/task workflows with session-scoped auto sync.
 
 Do not implement in MVP:
 
@@ -68,7 +70,6 @@ Do not implement in MVP:
 - complex recurring tasks
 - team collaboration
 - server-side search
-- web app
 - plugin system
 - CRDT collaboration
 

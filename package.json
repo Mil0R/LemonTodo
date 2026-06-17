@@ -4,7 +4,10 @@
   "description": "LemonTodo is a developer-first, local-first, end-to-end encrypted Todo application.",
   "private": true,
   "scripts": {
-    "e2e:register": "playwright test tests/register-page.spec.mjs"
+    "e2e:register": "playwright test tests/register-page.spec.mjs",
+    "web:dev": "npm --prefix apps/web run dev",
+    "web:build": "npm --prefix apps/web run build",
+    "web:preview": "npm --prefix apps/web run preview"
   },
   "repository": {
     "type": "git",

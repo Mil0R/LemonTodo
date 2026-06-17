@@ -8,6 +8,7 @@ The MVP is:
 
 - A developer-first Todo List.
 - TUI-first.
+- Web second.
 - Local-first.
 - End-to-end encrypted when synced.
 - Self-host friendly.
@@ -24,6 +25,7 @@ The MVP is:
 - Optional due date using date-only values.
 - Local search.
 - Manual sync first, automatic sync later.
+- Automatic sync should exist in both TUI and Web as a session-scoped feature, not a background daemon.
 - Clear sync status: pending, synced, offline, conflict.
 - Conflict view with explicit user resolution.
 
@@ -35,10 +37,34 @@ The MVP is:
 - Complex recurring tasks.
 - Team collaboration.
 - Server-side search.
-- Web app.
 - Plugin system.
 - CRDT-based real-time collaboration.
 - Markdown vault as the only source of truth.
+
+## Web Client MVP Scope
+
+The Web client is a focused second surface, not a full product rewrite.
+
+It should cover:
+
+- Project list and project switching.
+- Task creation.
+- Task completion toggle.
+- Task title editing.
+- Task note editing.
+- Task due date editing.
+- Task tag editing.
+- Task move between projects.
+- Task archive.
+- Search and filter.
+- Session-scoped auto sync.
+
+It should not start with:
+
+- Internal sync debugging views.
+- Key management screens.
+- Raw protocol inspection.
+- Backend admin tools.
 
 ## TUI Interaction Baseline
 
@@ -75,4 +101,3 @@ This is intentional:
 - Donations or sponsorships may support development.
 - Official hosted sync service may charge for server resources.
 - The product should not lock core functionality behind the official server.
-
