@@ -1,4 +1,7 @@
-use lemontodo_crypto::{KdfParams, VaultKey, derive_auth_hash, wrap_vault_key};
+use lemontodo_crypto::{
+    CryptoEnvelope, EncryptedVaultKey, KdfParams, VaultKey, decrypt, derive_auth_hash, encrypt,
+    unwrap_vault_key, wrap_vault_key,
+};
 use lemontodo_sync::{LoginRequest, RegisterRequest};
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
@@ -38,6 +41,37 @@ pub fn build_login_request(
         device_name: normalized_device_name,
     };
     serde_json::to_string(&request).map_err(to_js_error)
+}
+
+#[wasm_bindgen]
+pub fn unwrap_vault_key_hex(
+    encrypted_vault_key_json: &str,
+    master_password: &str,
+) -> Result<String, JsValue> {
+    let encrypted: EncryptedVaultKey =
+        serde_json::from_str(encrypted_vault_key_json).map_err(to_js_error)?;
+    let vault_key = unwrap_vault_key(&encrypted, master_password).map_err(to_js_error)?;
+    Ok(vault_key.to_hex())
+}
+
+#[wasm_bindgen]
+pub fn encrypt_payload(vault_key_hex: &str, plaintext: &str, aad: &str) -> Result<String, JsValue> {
+    let vault_key = VaultKey::from_hex(vault_key_hex).map_err(to_js_error)?;
+    let envelope =
+        encrypt(&vault_key, plaintext.as_bytes(), aad.as_bytes()).map_err(to_js_error)?;
+    serde_json::to_string(&envelope).map_err(to_js_error)
+}
+
+#[wasm_bindgen]
+pub fn decrypt_payload(
+    vault_key_hex: &str,
+    envelope_json: &str,
+    aad: &str,
+) -> Result<String, JsValue> {
+    let vault_key = VaultKey::from_hex(vault_key_hex).map_err(to_js_error)?;
+    let envelope: CryptoEnvelope = serde_json::from_str(envelope_json).map_err(to_js_error)?;
+    let plaintext = decrypt(&vault_key, &envelope, aad.as_bytes()).map_err(to_js_error)?;
+    String::from_utf8(plaintext).map_err(to_js_error)
 }
 
 fn to_js_error(error: impl std::fmt::Display) -> JsValue {

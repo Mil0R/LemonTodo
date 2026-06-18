@@ -16,6 +16,8 @@ const LAST_SYNC_CURSOR_KEY: &str = "sync.last_cursor";
 const SYNC_SERVER_URL_KEY: &str = "sync.server_url";
 const SYNC_ACCOUNT_EMAIL_KEY: &str = "sync.account_email";
 const SYNC_ACCESS_TOKEN_KEY: &str = "sync.access_token";
+const SYNC_UNLOCKED_VAULT_KEY_HEX_KEY: &str = "sync.unlocked_vault_key_hex";
+const SYNC_UNLOCKED_VAULT_KEY_EXPIRES_AT_KEY: &str = "sync.unlocked_vault_key_expires_at";
 
 pub struct TodoStore {
     conn: Connection,
@@ -156,6 +158,79 @@ impl TodoStore {
         Ok(project)
     }
 
+    pub fn rename_project_by_id(&self, id: Uuid, name: &str) -> Result<List> {
+        let name = normalize_project_name(name)?;
+        let project = self
+            .find_list_by_id(id)?
+            .with_context(|| format!("project not found: {id}"))?;
+        if project.name == name {
+            return Ok(project);
+        }
+        if self.find_list_by_name(&name)?.is_some() {
+            bail!("project already exists: {name}");
+        }
+        let updated = List {
+            id: project.id,
+            name,
+            revision: project.revision + 1,
+            created_at: project.created_at,
+            updated_at: Utc::now(),
+        };
+        self.conn.execute(
+            "UPDATE lists SET name = ?1, revision = ?2, updated_at = ?3 WHERE id = ?4",
+            params![
+                updated.name,
+                updated.revision,
+                updated.updated_at.to_rfc3339(),
+                updated.id.to_string()
+            ],
+        )?;
+        self.record_operation(
+            updated.id,
+            ObjectType::List,
+            OperationType::Update,
+            json!({ "list": updated }),
+        )?;
+        Ok(updated)
+    }
+
+    pub fn delete_project_by_id(&self, id: Uuid) -> Result<List> {
+        let project = self
+            .find_list_by_id(id)?
+            .with_context(|| format!("project not found: {id}"))?;
+        if project.name == "Inbox" {
+            bail!("Inbox cannot be deleted");
+        }
+        let active_task_count = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE list_id = ?1 AND deleted_at IS NULL",
+            params![project.id.to_string()],
+            |row| row.get::<_, usize>(0),
+        )?;
+        if active_task_count > 0 {
+            bail!("project still has active tasks");
+        }
+        let deleted = List {
+            revision: project.revision + 1,
+            updated_at: Utc::now(),
+            ..project
+        };
+        self.conn.execute(
+            "DELETE FROM tasks WHERE list_id = ?1",
+            params![deleted.id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM lists WHERE id = ?1",
+            params![deleted.id.to_string()],
+        )?;
+        self.record_operation(
+            deleted.id,
+            ObjectType::List,
+            OperationType::Delete,
+            json!({ "list": deleted }),
+        )?;
+        Ok(deleted)
+    }
+
     pub fn projects(&self) -> Result<Vec<List>> {
         self.list_lists()
     }
@@ -168,6 +243,14 @@ impl TodoStore {
     }
 
     pub fn import_snapshot(&mut self, snapshot: TodoSnapshot) -> Result<()> {
+        self.import_snapshot_internal(snapshot, true)
+    }
+
+    fn import_snapshot_internal(
+        &self,
+        snapshot: TodoSnapshot,
+        record_operation: bool,
+    ) -> Result<()> {
         if snapshot.version != TodoSnapshot::CURRENT_VERSION {
             bail!(
                 "unsupported snapshot version {}, expected {}",
@@ -176,7 +259,7 @@ impl TodoStore {
             );
         }
 
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.unchecked_transaction()?;
         let mut list_id_map = HashMap::new();
         for list in snapshot.lists {
             let existing_id = tx
@@ -255,12 +338,14 @@ impl TodoStore {
 
         tx.commit()?;
         self.ensure_inbox()?;
-        self.record_operation(
-            Uuid::new_v4(),
-            ObjectType::Snapshot,
-            OperationType::ImportSnapshot,
-            json!({ "imported_at": Utc::now() }),
-        )?;
+        if record_operation {
+            self.record_operation(
+                Uuid::new_v4(),
+                ObjectType::Snapshot,
+                OperationType::ImportSnapshot,
+                json!({ "imported_at": Utc::now() }),
+            )?;
+        }
         Ok(())
     }
 
@@ -365,6 +450,48 @@ impl TodoStore {
                 params![SYNC_ACCESS_TOKEN_KEY],
             )
             .context("failed to clear sync access token")?;
+        self.clear_cached_unlocked_vault_key()?;
+        Ok(())
+    }
+
+    pub fn save_cached_unlocked_vault_key(
+        &self,
+        vault_key_hex: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let vault_key_hex = vault_key_hex.trim();
+        if vault_key_hex.is_empty() {
+            bail!("cached vault key cannot be empty");
+        }
+        self.set_sync_state(SYNC_UNLOCKED_VAULT_KEY_HEX_KEY, vault_key_hex)?;
+        self.set_sync_state(
+            SYNC_UNLOCKED_VAULT_KEY_EXPIRES_AT_KEY,
+            &expires_at.to_rfc3339(),
+        )?;
+        Ok(())
+    }
+
+    pub fn cached_unlocked_vault_key(&self) -> Result<Option<(String, DateTime<Utc>)>> {
+        let Some(vault_key_hex) = self.get_sync_state(SYNC_UNLOCKED_VAULT_KEY_HEX_KEY)? else {
+            return Ok(None);
+        };
+        let Some(expires_at) = self.get_sync_state(SYNC_UNLOCKED_VAULT_KEY_EXPIRES_AT_KEY)? else {
+            self.clear_cached_unlocked_vault_key()?;
+            return Ok(None);
+        };
+        let expires_at =
+            DateTime::parse_from_rfc3339(&expires_at).context("failed to parse cache expiry")?;
+        Ok(Some((vault_key_hex, expires_at.with_timezone(&Utc))))
+    }
+
+    pub fn clear_cached_unlocked_vault_key(&self) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM sync_state WHERE key IN (?1, ?2)",
+            params![
+                SYNC_UNLOCKED_VAULT_KEY_HEX_KEY,
+                SYNC_UNLOCKED_VAULT_KEY_EXPIRES_AT_KEY
+            ],
+        )?;
         Ok(())
     }
 
@@ -521,10 +648,21 @@ impl TodoStore {
 
     pub fn apply_pending_remote_operations(&self) -> Result<RemoteApplySummary> {
         let mut pending = self.pending_remote_operations()?;
-        pending.sort_by_key(|remote| match remote.operation.object_type {
-            ObjectType::List => 0,
-            ObjectType::Task => 1,
-            ObjectType::Snapshot => 2,
+        pending.sort_by_key(|remote| {
+            match (
+                remote.operation.object_type,
+                remote.operation.operation_type,
+            ) {
+                (ObjectType::List, OperationType::Create) => 0,
+                (ObjectType::List, OperationType::Update) => 1,
+                (ObjectType::Task, OperationType::Create) => 2,
+                (ObjectType::Task, OperationType::Update) => 3,
+                (ObjectType::Task, OperationType::Archive) => 4,
+                (ObjectType::Task, OperationType::Delete) => 5,
+                (ObjectType::List, OperationType::Delete) => 6,
+                (ObjectType::Snapshot, OperationType::ImportSnapshot) => 7,
+                _ => 8,
+            }
         });
         let mut summary = RemoteApplySummary::default();
 
@@ -534,15 +672,21 @@ impl TodoStore {
                 remote.operation.operation_type,
             ) {
                 (ObjectType::List, OperationType::Create) => self.apply_remote_list_create(&remote),
+                (ObjectType::List, OperationType::Update) => self.apply_remote_list_update(&remote),
+                (ObjectType::List, OperationType::Delete) => self.apply_remote_list_delete(&remote),
                 (ObjectType::Task, OperationType::Create) => self.apply_remote_task_create(&remote),
                 (ObjectType::Task, OperationType::Update | OperationType::Archive) => {
                     self.apply_remote_task_update(&remote)
+                }
+                (ObjectType::Task, OperationType::Delete) => self.apply_remote_task_delete(&remote),
+                (ObjectType::Snapshot, OperationType::ImportSnapshot) => {
+                    self.apply_remote_snapshot_import(&remote)
                 }
                 _ => {
                     self.mark_remote_operation_blocked(
                         remote.id,
                         "skipped",
-                        "only safe create/update/archive operations can be applied automatically",
+                        "only safe create/update/delete/archive/import_snapshot operations can be applied automatically",
                     )?;
                     summary.skipped += 1;
                     continue;
@@ -566,6 +710,7 @@ impl TodoStore {
     }
 
     pub fn save_encrypted_vault_key(&self, encrypted_vault_key: &EncryptedVaultKey) -> Result<()> {
+        self.clear_cached_unlocked_vault_key()?;
         self.set_sync_state(
             "encrypted_vault_key",
             &serde_json::to_string(encrypted_vault_key)?,
@@ -721,6 +866,33 @@ impl TodoStore {
     pub fn archive_task_by_id(&self, id: Uuid) -> Result<Task> {
         let task = self.find_task_by_id(id)?;
         self.set_task_status(task, TaskStatus::Archived)
+    }
+
+    pub fn delete_task_by_id(&self, id: Uuid) -> Result<Task> {
+        let task = self.find_task_by_id(id)?;
+        let now = Utc::now();
+        let deleted = Task {
+            revision: task.revision + 1,
+            updated_at: now,
+            deleted_at: Some(now),
+            ..task
+        };
+        self.conn.execute(
+            "UPDATE tasks SET revision = ?1, updated_at = ?2, deleted_at = ?3 WHERE id = ?4",
+            params![
+                deleted.revision,
+                deleted.updated_at.to_rfc3339(),
+                deleted.deleted_at.map(|date| date.to_rfc3339()),
+                deleted.id.to_string()
+            ],
+        )?;
+        self.record_operation(
+            deleted.id,
+            ObjectType::Task,
+            OperationType::Delete,
+            json!({ "task": deleted }),
+        )?;
+        Ok(deleted)
     }
 
     pub fn toggle_done(&self, id: Uuid) -> Result<Task> {
@@ -1229,6 +1401,72 @@ impl TodoStore {
         Ok(RemoteApplyResult::Applied)
     }
 
+    fn apply_remote_list_update(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
+        let list = remote_operation_payload::<List>(&remote.operation, "list")?;
+        let Some(local_list) = self.find_list_by_id(list.id)? else {
+            return Ok(RemoteApplyResult::Skipped(
+                "list does not exist locally yet",
+            ));
+        };
+        if self.has_pending_local_operations(list.id)? {
+            return Ok(RemoteApplyResult::Conflict(
+                "local list has pending unsynced operations",
+            ));
+        }
+        if list.revision <= local_list.revision {
+            if list == local_list {
+                self.mark_remote_operation_applied(remote.id)?;
+                return Ok(RemoteApplyResult::Applied);
+            }
+            return Ok(RemoteApplyResult::Conflict(
+                "remote list revision is not newer than local revision",
+            ));
+        }
+        if let Some(existing) = self.find_list_by_name(&list.name)?
+            && existing.id != list.id
+        {
+            return Ok(RemoteApplyResult::Conflict(
+                "list name already exists locally",
+            ));
+        }
+        self.update_list_from_remote(&list)?;
+        self.mark_remote_operation_applied(remote.id)?;
+        Ok(RemoteApplyResult::Applied)
+    }
+
+    fn apply_remote_list_delete(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
+        let list = remote_operation_payload::<List>(&remote.operation, "list")?;
+        let Some(local_list) = self.find_list_by_id(list.id)? else {
+            self.mark_remote_operation_applied(remote.id)?;
+            return Ok(RemoteApplyResult::Applied);
+        };
+        if self.has_pending_local_operations(list.id)? {
+            return Ok(RemoteApplyResult::Conflict(
+                "local list has pending unsynced operations",
+            ));
+        }
+        if self.has_active_tasks_for_list(list.id)? {
+            return Ok(RemoteApplyResult::Skipped(
+                "list still has active tasks locally",
+            ));
+        }
+        if list.revision < local_list.revision {
+            return Ok(RemoteApplyResult::Conflict(
+                "remote list revision is older than local revision",
+            ));
+        }
+        self.conn.execute(
+            "DELETE FROM tasks WHERE list_id = ?1",
+            params![list.id.to_string()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM lists WHERE id = ?1",
+            params![list.id.to_string()],
+        )?;
+        self.mark_remote_operation_applied(remote.id)?;
+        Ok(RemoteApplyResult::Applied)
+    }
+
     fn apply_remote_task_create(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
         let task = remote_operation_payload::<Task>(&remote.operation, "task")?;
         if self.find_task_any_by_id(task.id)?.is_some() {
@@ -1296,6 +1534,39 @@ impl TodoStore {
         self.update_task_from_remote(&task)?;
         self.mark_remote_operation_applied(remote.id)?;
         Ok(RemoteApplyResult::Applied)
+    }
+
+    fn apply_remote_task_delete(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
+        let task = remote_operation_payload::<Task>(&remote.operation, "task")?;
+        let Some(local_task) = self.find_task_any_by_id(task.id)? else {
+            self.mark_remote_operation_applied(remote.id)?;
+            return Ok(RemoteApplyResult::Applied);
+        };
+        if self.has_pending_local_operations(task.id)? {
+            return Ok(RemoteApplyResult::Conflict(
+                "local task has pending unsynced operations",
+            ));
+        }
+        if task.revision < local_task.revision {
+            return Ok(RemoteApplyResult::Conflict(
+                "remote task revision is older than local revision",
+            ));
+        }
+        self.update_task_from_remote(&task)?;
+        self.mark_remote_operation_applied(remote.id)?;
+        Ok(RemoteApplyResult::Applied)
+    }
+
+    fn apply_remote_snapshot_import(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
+        let snapshot = remote_operation_payload::<TodoSnapshot>(&remote.operation, "snapshot")?;
+        if self.pending_operations()?.is_empty() {
+            self.import_snapshot_internal(snapshot, false)?;
+            self.mark_remote_operation_applied(remote.id)?;
+            return Ok(RemoteApplyResult::Applied);
+        }
+        Ok(RemoteApplyResult::Conflict(
+            "local device has pending unsynced operations",
+        ))
     }
 
     fn mark_remote_operation_applied(&self, id: Uuid) -> Result<()> {
@@ -1397,6 +1668,25 @@ impl TodoStore {
         self.mark_remote_operation_applied(remote.id)
     }
 
+    fn update_list_from_remote(&self, list: &List) -> Result<()> {
+        self.conn.execute(
+            "UPDATE lists
+             SET name = ?1,
+                 revision = ?2,
+                 created_at = ?3,
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                list.name,
+                list.revision,
+                list.created_at.to_rfc3339(),
+                list.updated_at.to_rfc3339(),
+                list.id.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
     fn update_task_from_remote(&self, task: &Task) -> Result<()> {
         self.conn.execute(
             "UPDATE tasks
@@ -1428,6 +1718,19 @@ impl TodoStore {
             ],
         )?;
         Ok(())
+    }
+
+    fn has_active_tasks_for_list(&self, list_id: Uuid) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM tasks
+                    WHERE list_id = ?1 AND deleted_at IS NULL
+                )",
+                params![list_id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .context("failed to query active list tasks")
     }
 
     fn find_pending_remote_conflict_by_operation_prefix(
@@ -1801,6 +2104,43 @@ mod tests {
     }
 
     #[test]
+    fn renames_and_deletes_projects_with_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+
+        let project = store.create_project("Alpha").unwrap();
+        let renamed = store.rename_project_by_id(project.id, "Beta").unwrap();
+        assert_eq!(renamed.name, "Beta");
+        let deleted = store.delete_project_by_id(renamed.id).unwrap();
+        assert_eq!(deleted.name, "Beta");
+
+        let operations = store.pending_operations().unwrap();
+        assert!(operations.iter().any(|operation| {
+            operation.object_type == ObjectType::List
+                && operation.operation_type == OperationType::Update
+        }));
+        assert!(operations.iter().any(|operation| {
+            operation.object_type == ObjectType::List
+                && operation.operation_type == OperationType::Delete
+        }));
+    }
+
+    #[test]
+    fn deletes_task_with_delete_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+
+        let task = store.add_task(NewTask::new("Delete me")).unwrap();
+        let deleted = store.delete_task_by_id(task.id).unwrap();
+        assert!(deleted.deleted_at.is_some());
+        assert!(store.list_tasks(true).unwrap().is_empty());
+        assert!(store.pending_operations().unwrap().iter().any(|operation| {
+            operation.object_type == ObjectType::Task
+                && operation.operation_type == OperationType::Delete
+        }));
+    }
+
+    #[test]
     fn persists_tui_current_project() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("lemontodo.db");
@@ -2046,6 +2386,81 @@ mod tests {
     }
 
     #[test]
+    fn applies_remote_list_update_task_delete_and_list_delete_when_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+
+        let project = store.create_project("Remote Project").unwrap();
+        let task = store
+            .add_task_to_project(NewTask::new("Remote Task"), Some("Remote Project"))
+            .unwrap();
+        store.mark_pending_operations_synced(None).unwrap();
+
+        let updated_project = List {
+            name: "Renamed Project".to_owned(),
+            revision: project.revision + 1,
+            updated_at: Utc::now(),
+            ..project.clone()
+        };
+        let deleted_task = Task {
+            revision: task.revision + 1,
+            updated_at: Utc::now(),
+            deleted_at: Some(Utc::now()),
+            ..task.clone()
+        };
+        let deleted_project = List {
+            revision: updated_project.revision + 1,
+            updated_at: Utc::now(),
+            ..updated_project.clone()
+        };
+        let operations = vec![
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: updated_project.id,
+                object_revision: updated_project.revision,
+                object_type: ObjectType::List,
+                operation_type: OperationType::Update,
+                payload: json!({ "list": updated_project }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: deleted_task.id,
+                object_revision: deleted_task.revision,
+                object_type: ObjectType::Task,
+                operation_type: OperationType::Delete,
+                payload: json!({ "task": deleted_task }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: deleted_project.id,
+                object_revision: deleted_project.revision,
+                object_type: ObjectType::List,
+                operation_type: OperationType::Delete,
+                payload: json!({ "list": deleted_project }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+        ];
+
+        store
+            .save_remote_operations(&operations, "cursor-2")
+            .unwrap();
+        let summary = store.apply_pending_remote_operations().unwrap();
+        assert_eq!(summary.applied, 3);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.conflicts, 0);
+        assert!(store.find_list_by_id(project.id).unwrap().is_none());
+        assert!(store.list_tasks(true).unwrap().is_empty());
+    }
+
+    #[test]
     fn leaves_remote_task_create_pending_when_list_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
@@ -2092,9 +2507,19 @@ mod tests {
     }
 
     #[test]
-    fn marks_unsupported_remote_operations_as_skipped() {
+    fn applies_remote_snapshot_import_when_local_device_is_clean() {
         let dir = tempfile::tempdir().unwrap();
         let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let snapshot = TodoSnapshot::new(
+            vec![List {
+                id: Uuid::new_v4(),
+                name: "Remote Project".to_owned(),
+                revision: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }],
+            vec![],
+        );
         let operation = Operation {
             id: Uuid::new_v4(),
             device_id: Uuid::new_v4(),
@@ -2102,7 +2527,7 @@ mod tests {
             object_revision: 2,
             object_type: ObjectType::Snapshot,
             operation_type: OperationType::ImportSnapshot,
-            payload: json!({ "imported_at": Utc::now() }),
+            payload: json!({ "snapshot": snapshot }),
             created_at: Utc::now(),
             synced_at: None,
         };
@@ -2111,20 +2536,11 @@ mod tests {
             .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
             .unwrap();
         let summary = store.apply_pending_remote_operations().unwrap();
-        assert_eq!(summary.applied, 0);
-        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.skipped, 0);
         assert_eq!(summary.conflicts, 0);
-
-        let pending = store.pending_remote_operations().unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].apply_status, "skipped");
-        assert_eq!(
-            pending[0].apply_reason,
-            Some(
-                "only safe create/update/archive operations can be applied automatically"
-                    .to_owned()
-            )
-        );
+        assert!(store.pending_remote_operations().unwrap().is_empty());
+        assert_eq!(store.projects().unwrap().len(), 2);
     }
 
     #[test]
@@ -2512,7 +2928,9 @@ mod tests {
             object_revision: 1,
             object_type: ObjectType::Snapshot,
             operation_type: OperationType::ImportSnapshot,
-            payload: json!({ "imported_at": Utc::now() }),
+            payload: json!({
+                "snapshot": TodoSnapshot::new(vec![], vec![])
+            }),
             created_at: Utc::now(),
             synced_at: None,
         };

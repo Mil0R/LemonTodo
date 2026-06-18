@@ -35,6 +35,7 @@ const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 const DEFAULT_REGISTER_WASM_DIR: &str = "target/register-wasm";
+const DEFAULT_WEB_CLIENT_URL: &str = "http://127.0.0.1:4173/";
 const REGISTER_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -43,66 +44,96 @@ const REGISTER_HTML: &str = r##"<!doctype html>
   <title>LemonTodo Register</title>
   <style>
     :root {
-      color-scheme: light dark;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: Canvas;
-      color: CanvasText;
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel-strong: #1d2430;
+      --line: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --shadow: 0 10px 18px rgba(0, 0, 0, 0.3);
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 14px;
     }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
-      min-height: 100vh;
+      min-height: 100dvh;
       display: grid;
       place-items: center;
-      padding: 24px;
+      padding: 10px;
+      background: var(--bg);
+      color: var(--text);
     }
     main {
       width: min(420px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 18px;
       display: grid;
-      gap: 18px;
+      gap: 14px;
+    }
+    .kicker {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
     }
     h1 {
       margin: 0;
-      font-size: 28px;
-      line-height: 1.1;
+      font-size: 1.15rem;
+      line-height: 1.2;
     }
     form {
       display: grid;
-      gap: 12px;
+      gap: 10px;
     }
     label {
       display: grid;
-      gap: 6px;
-      font-size: 14px;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 0.78rem;
     }
     input, button {
-      box-sizing: border-box;
       width: 100%;
-      min-height: 42px;
-      border: 1px solid color-mix(in srgb, CanvasText 24%, transparent);
-      border-radius: 6px;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
       padding: 8px 10px;
       font: inherit;
-      background: Canvas;
-      color: CanvasText;
+      background: var(--panel-strong);
+      color: var(--text);
+    }
+    input:focus-visible, button:focus-visible, a:focus-visible {
+      outline: 2px solid var(--green);
+      outline-offset: 2px;
     }
     button {
       cursor: pointer;
-      background: CanvasText;
-      color: Canvas;
-      border-color: CanvasText;
+      margin-top: 4px;
+      background: var(--green);
+      color: var(--bg);
+      border-color: rgba(63, 185, 80, 0.5);
+      font-weight: 600;
     }
     button:disabled {
       cursor: wait;
       opacity: 0.65;
     }
     #status {
-      min-height: 22px;
-      font-size: 14px;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 0.78rem;
     }
   </style>
 </head>
 <body>
   <main>
+    <p class="kicker">self-hosted account</p>
     <h1>LemonTodo Register</h1>
     <form id="register-form">
       <label>
@@ -193,77 +224,79 @@ const LOGIN_HTML_TEMPLATE: &str = r##"<!doctype html>
   <title>LemonTodo Login</title>
   <style>
     :root {
-      color-scheme: light dark;
-      --line: color-mix(in srgb, CanvasText 18%, transparent);
-      --muted: color-mix(in srgb, CanvasText 58%, transparent);
-      --accent: #d6ff57;
-      font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", "Liberation Mono", monospace;
-      background: Canvas;
-      color: CanvasText;
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel-strong: #1d2430;
+      --line: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --shadow: 0 10px 18px rgba(0, 0, 0, 0.3);
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 14px;
     }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
-      min-height: 100vh;
+      min-height: 100dvh;
       display: grid;
       place-items: center;
-      padding: 24px;
-      background:
-        linear-gradient(var(--line) 1px, transparent 1px),
-        linear-gradient(90deg, var(--line) 1px, transparent 1px),
-        Canvas;
-      background-size: 36px 36px;
+      padding: 10px;
+      background: var(--bg);
+      color: var(--text);
     }
     main {
       width: min(440px, 100%);
       border: 1px solid var(--line);
-      background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
-      padding: 28px;
-      box-shadow: 10px 10px 0 color-mix(in srgb, CanvasText 12%, transparent);
+      border-radius: 6px;
+      background: var(--panel);
+      padding: 18px;
+      box-shadow: var(--shadow);
     }
     .kicker {
-      margin: 0 0 10px;
+      margin: 0 0 6px;
       color: var(--muted);
-      font-size: 12px;
-      letter-spacing: 0.18em;
+      font-size: 0.75rem;
+      letter-spacing: 0.02em;
       text-transform: uppercase;
     }
     h1 {
-      margin: 0 0 22px;
-      font-size: 28px;
-      line-height: 1.05;
-      letter-spacing: -0.04em;
+      margin: 0 0 16px;
+      font-size: 1.15rem;
+      line-height: 1.2;
     }
     form {
       display: grid;
-      gap: 14px;
+      gap: 10px;
     }
     label {
       display: grid;
-      gap: 7px;
-      font-size: 13px;
+      gap: 5px;
+      font-size: 0.78rem;
       color: var(--muted);
     }
     input, button {
-      box-sizing: border-box;
       width: 100%;
-      min-height: 42px;
+      min-height: 34px;
       border: 1px solid var(--line);
-      border-radius: 0;
-      padding: 9px 10px;
+      border-radius: 4px;
+      padding: 8px 10px;
       font: inherit;
-      background: Canvas;
-      color: CanvasText;
+      background: var(--panel-strong);
+      color: var(--text);
     }
     input:focus-visible, button:focus-visible, a:focus-visible {
-      outline: 2px solid var(--accent);
+      outline: 2px solid var(--green);
       outline-offset: 2px;
     }
     button {
       cursor: pointer;
       margin-top: 4px;
-      background: CanvasText;
-      color: Canvas;
-      border-color: CanvasText;
+      background: var(--green);
+      color: var(--bg);
+      border-color: rgba(63, 185, 80, 0.5);
+      font-weight: 600;
     }
     button:disabled {
       cursor: wait;
@@ -272,21 +305,21 @@ const LOGIN_HTML_TEMPLATE: &str = r##"<!doctype html>
     .footer {
       display: flex;
       justify-content: space-between;
-      gap: 16px;
-      margin-top: 18px;
+      gap: 12px;
+      margin-top: 14px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 0.78rem;
     }
     a {
-      color: CanvasText;
+      color: var(--text);
       text-decoration: underline;
       text-underline-offset: 3px;
     }
     #status {
-      min-height: 21px;
-      margin-top: 14px;
+      min-height: 18px;
+      margin-top: 10px;
       color: var(--muted);
-      font-size: 13px;
+      font-size: 0.78rem;
     }
   </style>
 </head>
@@ -361,7 +394,9 @@ const LOGIN_HTML_TEMPLATE: &str = r##"<!doctype html>
         }
         const session = await response.json();
         sessionStorage.setItem("lemontodo_console_token", session.access_token);
-        window.location.assign(`/console?access_token=${encodeURIComponent(session.access_token)}`);
+        const next = new URL(__WEB_CLIENT_URL_JSON__);
+        next.searchParams.set("access_token", session.access_token);
+        window.location.assign(next.toString());
       } catch (error) {
         setStatus(error.message || "Login failed.");
       } finally {
@@ -378,10 +413,67 @@ const REGISTRATION_DISABLED_HTML: &str = r##"<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LemonTodo Register</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --line: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --shadow: 0 10px 18px rgba(0, 0, 0, 0.3);
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 14px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      display: grid;
+      place-items: center;
+      padding: 10px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    main {
+      width: min(420px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 18px;
+      display: grid;
+      gap: 12px;
+    }
+    .kicker {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      font-size: 1.15rem;
+      line-height: 1.2;
+    }
+    a {
+      color: var(--text);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    a:focus-visible {
+      outline: 2px solid var(--green);
+      outline-offset: 2px;
+    }
+  </style>
 </head>
 <body>
   <main>
+    <p class="kicker">self-hosted account</p>
     <h1>Registration is disabled</h1>
+    <a href="/">Back to login</a>
   </main>
 </body>
 </html>
@@ -397,6 +489,7 @@ pub struct ServerConfig {
     pub admin_email: Option<String>,
     pub admin_password: Option<String>,
     pub register_wasm_dir: PathBuf,
+    pub web_client_url: String,
 }
 
 impl ServerConfig {
@@ -439,6 +532,10 @@ impl ServerConfig {
         let register_wasm_dir = lookup("LEMONTODO_REGISTER_WASM_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_REGISTER_WASM_DIR));
+        let web_client_url = lookup("LEMONTODO_WEB_CLIENT_URL")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_WEB_CLIENT_URL.to_owned());
 
         Ok(Self {
             host,
@@ -449,6 +546,7 @@ impl ServerConfig {
             admin_email,
             admin_password,
             register_wasm_dir,
+            web_client_url,
         })
     }
 
@@ -1074,7 +1172,10 @@ async fn healthz() -> Json<HealthResponse> {
 }
 
 async fn login_page(State(state): State<AppState>) -> Html<String> {
-    Html(login_html(state.config.allow_registration))
+    Html(login_html(
+        state.config.allow_registration,
+        &state.config.web_client_url,
+    ))
 }
 
 async fn console_page(
@@ -1107,13 +1208,17 @@ async fn register_page(State(state): State<AppState>) -> Html<&'static str> {
     }
 }
 
-fn login_html(allow_registration: bool) -> String {
+fn login_html(allow_registration: bool, web_client_url: &str) -> String {
     let register_link = if allow_registration {
         r#"<a href="/register">Create account</a>"#
     } else {
         ""
     };
-    LOGIN_HTML_TEMPLATE.replace("__REGISTER_LINK__", register_link)
+    let web_client_url_json =
+        serde_json::to_string(web_client_url).unwrap_or_else(|_| "\"/\"".to_owned());
+    LOGIN_HTML_TEMPLATE
+        .replace("__REGISTER_LINK__", register_link)
+        .replace("__WEB_CLIENT_URL_JSON__", &web_client_url_json)
 }
 
 fn console_html(email: &str) -> String {
@@ -1127,52 +1232,53 @@ fn console_html(email: &str) -> String {
   <title>LemonTodo Console</title>
   <style>
     :root {{
-      color-scheme: light dark;
-      --line: color-mix(in srgb, CanvasText 18%, transparent);
-      --muted: color-mix(in srgb, CanvasText 58%, transparent);
-      --accent: #d6ff57;
-      font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", "Liberation Mono", monospace;
-      background: Canvas;
-      color: CanvasText;
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --line: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --shadow: 0 10px 18px rgba(0, 0, 0, 0.3);
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 14px;
     }}
+    * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      min-height: 100vh;
+      min-height: 100dvh;
       display: grid;
       place-items: center;
-      padding: 24px;
-      background:
-        linear-gradient(var(--line) 1px, transparent 1px),
-        linear-gradient(90deg, var(--line) 1px, transparent 1px),
-        Canvas;
-      background-size: 36px 36px;
+      padding: 10px;
+      background: var(--bg);
+      color: var(--text);
     }}
     main {{
       width: min(520px, 100%);
       border: 1px solid var(--line);
-      background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
-      padding: 28px;
-      box-shadow: 10px 10px 0 color-mix(in srgb, CanvasText 12%, transparent);
+      border-radius: 6px;
+      background: var(--panel);
+      padding: 18px;
+      box-shadow: var(--shadow);
     }}
     .kicker {{
-      margin: 0 0 10px;
+      margin: 0 0 6px;
       color: var(--muted);
-      font-size: 12px;
-      letter-spacing: 0.18em;
+      font-size: 0.75rem;
+      letter-spacing: 0.02em;
       text-transform: uppercase;
     }}
     h1 {{
-      margin: 0 0 22px;
-      font-size: 28px;
-      line-height: 1.05;
-      letter-spacing: -0.04em;
+      margin: 0 0 16px;
+      font-size: 1.15rem;
+      line-height: 1.2;
     }}
     dl {{
       display: grid;
       grid-template-columns: 100px 1fr;
-      gap: 10px 14px;
-      margin: 0 0 20px;
-      padding-top: 16px;
+      gap: 8px 12px;
+      margin: 0 0 16px;
+      padding-top: 12px;
       border-top: 1px solid var(--line);
     }}
     dt {{
@@ -1183,12 +1289,12 @@ fn console_html(email: &str) -> String {
       overflow-wrap: anywhere;
     }}
     a {{
-      color: CanvasText;
+      color: var(--text);
       text-decoration: underline;
       text-underline-offset: 3px;
     }}
     a:focus-visible {{
-      outline: 2px solid var(--accent);
+      outline: 2px solid var(--green);
       outline-offset: 2px;
     }}
   </style>
@@ -1218,9 +1324,71 @@ fn console_error_html(message: &str) -> String {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LemonTodo Console</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --line: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --red: #f85149;
+      --green: #3fb950;
+      --shadow: 0 10px 18px rgba(0, 0, 0, 0.3);
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 14px;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100dvh;
+      display: grid;
+      place-items: center;
+      padding: 10px;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    main {{
+      width: min(520px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 18px;
+      display: grid;
+      gap: 12px;
+    }}
+    .kicker {{
+      margin: 0;
+      color: var(--red);
+      font-size: 0.75rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: 1.15rem;
+      line-height: 1.2;
+    }}
+    p {{
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }}
+    a {{
+      color: var(--text);
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }}
+    a:focus-visible {{
+      outline: 2px solid var(--green);
+      outline-offset: 2px;
+    }}
+  </style>
 </head>
 <body>
   <main>
+    <p class="kicker">console</p>
     <h1>Console unavailable</h1>
     <p>{escaped_message}</p>
     <a href="/">Back to login</a>
@@ -2673,6 +2841,7 @@ mod tests {
             admin_email: None,
             admin_password: None,
             register_wasm_dir: PathBuf::from(DEFAULT_REGISTER_WASM_DIR),
+            web_client_url: DEFAULT_WEB_CLIENT_URL.to_owned(),
         }
     }
 

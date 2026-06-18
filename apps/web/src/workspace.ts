@@ -83,6 +83,11 @@ type WorkspaceAction =
 
 const STORAGE_KEY = "lemontodo.web.workspace.v1";
 
+export function workspaceStorageKey(email?: string | null): string {
+  const account = email?.trim().toLowerCase();
+  return account ? `${STORAGE_KEY}:${account}` : STORAGE_KEY;
+}
+
 export function createSeedWorkspace(): WorkspaceState {
   const inbox = createProject("Inbox");
   const projectAlpha = createProject("Alpha");
@@ -113,12 +118,12 @@ export function createSeedWorkspace(): WorkspaceState {
   };
 }
 
-export function loadWorkspace(): WorkspaceState {
+export function loadWorkspace(storageKey = STORAGE_KEY): WorkspaceState {
   if (typeof window === "undefined") {
     return createSeedWorkspace();
   }
 
-  const raw = window.localStorage.getItem(STORAGE_KEY);
+  const raw = window.localStorage.getItem(storageKey);
   if (!raw) {
     return createSeedWorkspace();
   }
@@ -131,7 +136,7 @@ export function loadWorkspace(): WorkspaceState {
   }
 }
 
-export function persistWorkspace(state: WorkspaceState): void {
+export function persistWorkspace(state: WorkspaceState, storageKey = STORAGE_KEY): void {
   if (typeof window === "undefined") {
     return;
   }
@@ -141,7 +146,7 @@ export function persistWorkspace(state: WorkspaceState): void {
       ...state.sync,
     },
   };
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
 }
 
 export function workspaceReducer(

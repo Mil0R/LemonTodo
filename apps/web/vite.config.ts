@@ -6,5 +6,9 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 4173,
+    proxy: {
+      "/v1": "http://127.0.0.1:8787",
+      "/register": "http://127.0.0.1:8787",
+    },
   },
 });

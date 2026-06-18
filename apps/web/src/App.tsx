@@ -1,8 +1,20 @@
-import { useEffect, useReducer, useRef } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import {
-  STORAGE_KEY,
+  cacheUnlockedVaultKey,
+  clearWebSession,
+  clearCachedVaultKey,
+  fetchAccount,
+  pullWorkspaceSnapshot,
+  pushWorkspaceSnapshot,
+  readCachedVaultKey,
+  readAccessTokenFromLocation,
+  unlockVaultKey,
+  type AccountStatus,
+} from "./serverSync";
+import {
   loadWorkspace,
   persistWorkspace,
+  workspaceStorageKey,
   workspaceReducer,
   type DraftTask,
   type Project,
@@ -12,8 +24,19 @@ import {
 
 function App() {
   const [state, dispatch] = useReducer(workspaceReducer, undefined, loadWorkspace);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [account, setAccount] = useState<AccountStatus | null>(null);
+  const [vaultKeyHex, setVaultKeyHex] = useState<string | null>(null);
+  const pullInFlight = useRef(false);
   const latestState = useRef<WorkspaceState>(state);
+  const latestAccount = useRef<AccountStatus | null>(null);
+  const latestAccessToken = useRef<string | null>(null);
+  const latestVaultKeyHex = useRef<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   latestState.current = state;
+  latestAccount.current = account;
+  latestAccessToken.current = accessToken;
+  latestVaultKeyHex.current = vaultKeyHex;
 
   useEffect(() => {
     if (state.sync.enabled && state.revision !== state.savedRevision) {
@@ -23,13 +46,93 @@ function App() {
       return () => window.clearTimeout(timeout);
     }
     return undefined;
-  }, [state.revision, state.savedRevision, state.sync.enabled]);
+  }, [state.revision, state.savedRevision, state.sync.enabled, account?.email, accessToken]);
+
+  useEffect(() => {
+    const token = readAccessTokenFromLocation();
+    if (!token) {
+      dispatch({
+        type: "set_sync_status",
+        status: "locked",
+        message: "Log in on the server to enable sync",
+      });
+      return;
+    }
+    setAccessToken(token);
+    fetchAccount(token)
+      .then(async (nextAccount) => {
+        setAccount(nextAccount);
+        const cachedVaultKey = readCachedVaultKey(nextAccount.email);
+        let unlockedVaultKey = cachedVaultKey;
+        if (!unlockedVaultKey) {
+          const masterPassword = window.prompt("Master password is required to unlock Web sync.");
+          if (!masterPassword) {
+            dispatch({
+              type: "set_sync_status",
+              status: "locked",
+              message: "Vault locked",
+            });
+            return;
+          }
+          unlockedVaultKey = await unlockVaultKey(token, masterPassword);
+          cacheUnlockedVaultKey(nextAccount.email, unlockedVaultKey);
+        }
+        setVaultKeyHex(unlockedVaultKey);
+        const storageKey = workspaceStorageKey(nextAccount.email);
+        const localWorkspace = loadWorkspace(storageKey);
+        dispatch({ type: "hydrate", snapshot: localWorkspace });
+        dispatch({
+          type: "set_sync_status",
+          status: "syncing",
+          message: "Checking server workspace",
+        });
+        const remoteWorkspace = await pullWorkspaceSnapshot(
+          token,
+          nextAccount.email,
+          unlockedVaultKey,
+          localWorkspace,
+        );
+        if (remoteWorkspace) {
+          const hydrated = createSavedSnapshot(remoteWorkspace, new Date().toISOString());
+          persistWorkspace(hydrated, storageKey);
+          dispatch({ type: "hydrate", snapshot: hydrated });
+          dispatch({
+            type: "set_sync_status",
+            status: "saved",
+            message: "Server workspace loaded",
+          });
+        } else {
+          persistWorkspace(localWorkspace, storageKey);
+          dispatch({
+            type: "set_sync_status",
+            status: "saved",
+            message: "Logged in, local workspace ready",
+          });
+        }
+      })
+      .catch((error: Error) => {
+        clearWebSession();
+        if (account?.email) {
+          clearCachedVaultKey(account.email);
+        }
+        setAccessToken(null);
+        setAccount(null);
+        setVaultKeyHex(null);
+        dispatch({
+          type: "set_sync_status",
+          status: "offline",
+          message: error.message || "Login session failed",
+        });
+      });
+  }, []);
 
   useEffect(() => {
     const flushOnVisibility = () => {
       if (document.visibilityState === "hidden") {
         syncState("background");
+        return;
       }
+      pullRemoteUpdates("resume");
     };
 
     const flushOnBeforeUnload = () => {
@@ -37,12 +140,12 @@ function App() {
     };
 
     const hydrateFromStorage = (event: StorageEvent) => {
-      if (event.key !== STORAGE_KEY || !event.newValue) {
+      if (event.key !== workspaceStorageKey(latestAccount.current?.email) || !event.newValue) {
         return;
       }
       try {
         const incoming = JSON.parse(event.newValue) as WorkspaceState;
-        if (incoming.revision > latestState.current.revision) {
+        if (workspaceContentChanged(latestState.current, incoming)) {
           dispatch({ type: "hydrate", snapshot: incoming });
         }
       } catch {
@@ -65,8 +168,74 @@ function App() {
     };
   }, []);
 
-  function syncState(reason: "auto" | "manual" | "background" | "unload") {
+  useEffect(() => {
+    if (!account || !accessToken || !vaultKeyHex) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      pullRemoteUpdates("poll");
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [account?.email, accessToken, vaultKeyHex]);
+
+  useEffect(() => {
+    const handleTaskShortcut = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      if (isTypingTarget(event.target)) {
+        return;
+      }
+      if (event.key === "/") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+      if (event.key === "a" || event.key === "A") {
+        event.preventDefault();
+        dispatch({ type: "new_task" });
+        return;
+      }
+
+      const currentTasks = filterTasks(
+        latestState.current.tasks,
+        latestState.current.search,
+        latestState.current.currentProjectId,
+      );
+      if (!currentTasks.length) {
+        return;
+      }
+      const selectedId = latestState.current.selectedTaskId;
+      const selectedIndex = currentTasks.findIndex((task) => task.id === selectedId);
+      const activeIndex = selectedIndex >= 0 ? selectedIndex : 0;
+      if (event.key === "j" || event.key === "J") {
+        event.preventDefault();
+        const nextTask = currentTasks[Math.min(currentTasks.length - 1, activeIndex + 1)];
+        dispatch({ type: "select_task", taskId: nextTask.id });
+        return;
+      }
+      if (event.key === "k" || event.key === "K") {
+        event.preventDefault();
+        const nextTask = currentTasks[Math.max(0, activeIndex - 1)];
+        dispatch({ type: "select_task", taskId: nextTask.id });
+        return;
+      }
+      if (event.key === " ") {
+        event.preventDefault();
+        dispatch({ type: "toggle_task", taskId: currentTasks[activeIndex].id });
+      }
+    };
+
+    window.addEventListener("keydown", handleTaskShortcut);
+    return () => window.removeEventListener("keydown", handleTaskShortcut);
+  }, []);
+
+  async function syncState(reason: "auto" | "manual" | "background" | "unload") {
     const current = latestState.current;
+    const currentAccount = latestAccount.current;
+    const token = latestAccessToken.current;
+    const currentVaultKey = latestVaultKeyHex.current;
     if (reason === "auto" && !current.sync.enabled) {
       return;
     }
@@ -82,19 +251,94 @@ function App() {
 
     try {
       const timestamp = new Date().toISOString();
-      persistWorkspace(createSavedSnapshot(current, timestamp));
+      const storageKey = workspaceStorageKey(currentAccount?.email);
+      const saved = createSavedSnapshot(current, timestamp);
+      if (token && currentAccount && currentVaultKey) {
+        if (current.revision !== current.savedRevision || reason === "manual") {
+          await pushWorkspaceSnapshot(token, currentAccount.email, currentVaultKey, saved);
+        }
+        const remoteWorkspace = await pullWorkspaceSnapshot(
+          token,
+          currentAccount.email,
+          currentVaultKey,
+          saved,
+        );
+        if (remoteWorkspace && workspaceContentChanged(current, remoteWorkspace)) {
+          const hydrated = createSavedSnapshot(remoteWorkspace, timestamp);
+          persistWorkspace(hydrated, storageKey);
+          dispatch({ type: "hydrate", snapshot: hydrated });
+          dispatch({
+            type: "set_sync_status",
+            status: "saved",
+            message: "Remote updates applied",
+          });
+          return;
+        }
+      }
+      persistWorkspace(saved, storageKey);
       dispatch({ type: "mark_saved", timestamp });
       dispatch({
         type: "set_sync_status",
         status: "saved",
-        message: reason === "manual" ? "Workspace saved" : "Workspace synced",
+        message:
+          token && currentAccount && currentVaultKey
+            ? reason === "manual"
+              ? "Server sync complete"
+              : "Synced to server"
+            : reason === "manual"
+              ? "Workspace saved locally"
+              : "Workspace saved locally",
       });
-    } catch {
+    } catch (error) {
       dispatch({
         type: "set_sync_status",
         status: "offline",
-        message: "Local sync failed",
+        message: error instanceof Error ? error.message : "Local sync failed",
       });
+    }
+  }
+
+  async function pullRemoteUpdates(reason: "poll" | "resume") {
+    const current = latestState.current;
+    const currentAccount = latestAccount.current;
+    const token = latestAccessToken.current;
+    const currentVaultKey = latestVaultKeyHex.current;
+    if (!current.sync.enabled || current.revision !== current.savedRevision) {
+      return;
+    }
+    if (!token || !currentAccount || !currentVaultKey || pullInFlight.current) {
+      return;
+    }
+
+    pullInFlight.current = true;
+    try {
+      const timestamp = new Date().toISOString();
+      const storageKey = workspaceStorageKey(currentAccount.email);
+      const remoteWorkspace = await pullWorkspaceSnapshot(
+        token,
+        currentAccount.email,
+        currentVaultKey,
+        current,
+      );
+      if (!remoteWorkspace || !workspaceContentChanged(current, remoteWorkspace)) {
+        return;
+      }
+      const hydrated = createSavedSnapshot(remoteWorkspace, timestamp);
+      persistWorkspace(hydrated, storageKey);
+      dispatch({ type: "hydrate", snapshot: hydrated });
+      dispatch({
+        type: "set_sync_status",
+        status: "saved",
+        message: reason === "resume" ? "Remote updates loaded" : "Remote updates applied",
+      });
+    } catch (error) {
+      dispatch({
+        type: "set_sync_status",
+        status: "offline",
+        message: error instanceof Error ? error.message : "Remote sync failed",
+      });
+    } finally {
+      pullInFlight.current = false;
     }
   }
 
@@ -145,6 +389,7 @@ function App() {
 
         <div className="status-strip" aria-live="polite">
           <StatusChip tone={state.sync.status}>{state.sync.message}</StatusChip>
+          <span className="mono-meta">{account ? account.email : "not logged in"}</span>
           <span className="mono-meta">
             rev {state.revision} / saved {state.savedRevision}
           </span>
@@ -167,6 +412,11 @@ function App() {
           <button className="button button-ghost" onClick={handleNewTask}>
             + Task
           </button>
+          {!account ? (
+            <a className="button button-ghost" href={serverLoginUrl()}>
+              Login
+            </a>
+          ) : null}
           <button className="button button-primary" onClick={() => syncState("manual")}>
             ↻ Sync
           </button>
@@ -228,11 +478,24 @@ function App() {
               <div className="panel-label">Tasks</div>
               <h2>{selectedProject ? selectedProject.name : "Inbox"}</h2>
             </div>
-            <span className="panel-count">{visibleTasks.length}</span>
+            <div className="task-head-actions">
+              <div className="shortcut-strip" aria-label="Task shortcuts">
+                <kbd>j/k</kbd>
+                <span>select</span>
+                <kbd>space</kbd>
+                <span>toggle</span>
+                <kbd>/</kbd>
+                <span>search</span>
+                <kbd>a</kbd>
+                <span>add</span>
+              </div>
+              <span className="panel-count">{visibleTasks.length}</span>
+            </div>
           </div>
 
           <div className="task-toolbar">
             <input
+              ref={searchInputRef}
               className="terminal-input"
               value={state.search}
               onChange={(event) => dispatch({ type: "set_search", value: event.target.value })}
@@ -261,10 +524,6 @@ function App() {
                     <div className="task-line">
                       <span className="task-marker">{taskMarker(task.status)}</span>
                       <span className="task-title">{task.title}</span>
-                    </div>
-                    <div className="task-meta">
-                      <span>{task.dueDate || "no due date"}</span>
-                      <span>{task.tags.length ? task.tags.map((tag) => `#${tag}`).join(" ") : "untagged"}</span>
                     </div>
                   </button>
                 );
@@ -485,6 +744,19 @@ function filterTasks(tasks: Task[], query: string, projectId: string | null) {
     });
 }
 
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const tagName = target.tagName.toLowerCase();
+  return (
+    target.isContentEditable ||
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select"
+  );
+}
+
 function createSavedSnapshot(state: WorkspaceState, timestamp: string): WorkspaceState {
   return {
     ...state,
@@ -496,6 +768,22 @@ function createSavedSnapshot(state: WorkspaceState, timestamp: string): Workspac
       lastSyncedAt: timestamp,
     },
   };
+}
+
+function workspaceContentChanged(left: WorkspaceState, right: WorkspaceState) {
+  return JSON.stringify(contentFingerprint(left)) !== JSON.stringify(contentFingerprint(right));
+}
+
+function contentFingerprint(state: WorkspaceState) {
+  return {
+    projects: [...state.projects].sort((left, right) => left.id.localeCompare(right.id)),
+    tasks: [...state.tasks].sort((left, right) => left.id.localeCompare(right.id)),
+  };
+}
+
+function serverLoginUrl() {
+  const base = import.meta.env.VITE_LEMONTODO_SERVER_URL ?? "http://127.0.0.1:8787";
+  return new URL("/", base).toString();
 }
 
 function formatClock(value: string) {

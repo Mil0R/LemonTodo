@@ -128,6 +128,7 @@ impl TryFrom<&str> for ObjectType {
 pub enum OperationType {
     Create,
     Update,
+    Delete,
     Archive,
     ImportSnapshot,
 }
@@ -137,6 +138,7 @@ impl OperationType {
         match self {
             Self::Create => "create",
             Self::Update => "update",
+            Self::Delete => "delete",
             Self::Archive => "archive",
             Self::ImportSnapshot => "import_snapshot",
         }
@@ -150,6 +152,7 @@ impl TryFrom<&str> for OperationType {
         match value {
             "create" => Ok(Self::Create),
             "update" => Ok(Self::Update),
+            "delete" => Ok(Self::Delete),
             "archive" => Ok(Self::Archive),
             "import_snapshot" => Ok(Self::ImportSnapshot),
             other => Err(format!("unknown operation type: {other}")),

@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::NaiveDate;
+use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -35,9 +35,10 @@ use crate::{
 };
 
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8787";
-const TUI_AUTO_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+const TUI_AUTO_SYNC_INTERVAL: Duration = Duration::from_secs(10);
 const TUI_AUTO_SYNC_DEBOUNCE: Duration = Duration::from_secs(5);
 const TUI_AUTO_SYNC_LIMIT: u32 = 100;
+const TUI_UNLOCK_CACHE_TTL_SECS: i64 = 60 * 60 * 12;
 
 #[derive(Debug, Parser)]
 #[command(name = "ltd")]
@@ -1086,7 +1087,14 @@ fn pull_remote_operations_with_vault_key(
     let operations = response
         .objects
         .iter()
-        .map(|object| unpack_operation(vault_key, object))
+        .map(|object| {
+            unpack_operation(vault_key, object).with_context(|| {
+                format!(
+                    "failed to decrypt remote object {} type={} op={} revision={}",
+                    object.id, object.object_type, object.operation_type, object.object_revision
+                )
+            })
+        })
         .collect::<Result<Vec<_>>>()?;
 
     Ok(PullSummary {
@@ -1174,6 +1182,11 @@ fn run_login_command(
     store.save_sync_server_url(server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL))?;
     store.save_sync_account_email(&response.email)?;
     store.save_sync_access_token(&response.access_token)?;
+    let encrypted = store
+        .encrypted_vault_key()?
+        .context("local vault metadata is not initialized after login")?;
+    let vault_key = unwrap_vault_key(&encrypted, &master_password)?;
+    cache_tui_vault_key(store, &vault_key)?;
     println!("Logged in as {}", response.email);
     Ok(())
 }
@@ -1278,11 +1291,16 @@ fn verify_or_save_vault_metadata(
     remote: &lemontodo_crypto::EncryptedVaultKey,
     master_password: &str,
 ) -> Result<()> {
-    unwrap_vault_key(remote, master_password)
+    let remote_key = unwrap_vault_key(remote, master_password)
         .context("master password could not unlock the server vault metadata")?;
     if let Some(local) = store.encrypted_vault_key()? {
-        unwrap_vault_key(&local, master_password)
+        let local_key = unwrap_vault_key(&local, master_password)
             .context("master password could not unlock the existing local vault metadata")?;
+        if local_key != remote_key {
+            anyhow::bail!(
+                "local vault metadata does not match the server account; use `ltd sync connect --force --pull` on a fresh/intentional device import path"
+            );
+        }
     } else {
         store.save_encrypted_vault_key(remote)?;
     }
@@ -1313,6 +1331,8 @@ fn connect_device(
         options.force,
         options.master_password,
     )?;
+    let vault_key = unwrap_vault_key(&encrypted_vault_key, options.master_password)?;
+    cache_tui_vault_key(store, &vault_key)?;
     store.save_sync_server_url(&server_url)?;
     store.save_sync_account_email(&login.email)?;
     store.save_sync_access_token(&login.access_token)?;
@@ -1362,6 +1382,7 @@ fn register_account(
     )?;
     unwrap_vault_key(&encrypted_vault_key, master_password)?;
     store.save_encrypted_vault_key(&encrypted_vault_key)?;
+    cache_tui_vault_key(store, &vault_key)?;
     post_register_request(
         &server_url,
         &RegisterRequest {
@@ -1755,8 +1776,12 @@ fn unlock_tui_auto_sync(store: &TodoStore) -> Result<Option<VaultKey>> {
         return Ok(None);
     }
 
+    if let Some(vault_key) = cached_tui_vault_key(store)? {
+        return Ok(Some(vault_key));
+    }
+
     let master_password =
-        prompt_master_password("Master password for TUI auto-sync (empty skips): ")?;
+        prompt_master_password("Master password for TUI startup/auto/exit sync (empty skips): ")?;
     if master_password.is_empty() {
         println!("TUI auto-sync disabled");
         return Ok(None);
@@ -1766,7 +1791,10 @@ fn unlock_tui_auto_sync(store: &TodoStore) -> Result<Option<VaultKey>> {
         .encrypted_vault_key()?
         .context("local vault metadata is not initialized; run ltd login first")?;
     match unwrap_vault_key(&encrypted, &master_password) {
-        Ok(vault_key) => Ok(Some(vault_key)),
+        Ok(vault_key) => {
+            cache_tui_vault_key(store, &vault_key)?;
+            Ok(Some(vault_key))
+        }
         Err(error) => {
             println!("TUI auto-sync disabled: {error}");
             Ok(None)
@@ -1785,19 +1813,50 @@ fn load_vault_key(
             let encrypted = store
                 .encrypted_vault_key()?
                 .context("local vault metadata is not initialized; run ltd vault init first")?;
-            unwrap_vault_key(&encrypted, &master_password)
+            let vault_key = unwrap_vault_key(&encrypted, &master_password)?;
+            cache_tui_vault_key(store, &vault_key)?;
+            Ok(vault_key)
         }
         (None, None) => {
+            if let Some(vault_key) = cached_tui_vault_key(store)? {
+                return Ok(vault_key);
+            }
             let encrypted = store
                 .encrypted_vault_key()?
                 .context("local vault metadata is not initialized; run ltd vault init first")?;
             let master_password = prompt_master_password("Master password: ")?;
-            unwrap_vault_key(&encrypted, &master_password)
+            let vault_key = unwrap_vault_key(&encrypted, &master_password)?;
+            cache_tui_vault_key(store, &vault_key)?;
+            Ok(vault_key)
         }
         (Some(_), Some(_)) => {
             anyhow::bail!("use either --key or --master-password, not both")
         }
     }
+}
+
+fn cached_tui_vault_key(store: &TodoStore) -> Result<Option<VaultKey>> {
+    let Some((vault_key_hex, expires_at)) = store.cached_unlocked_vault_key()? else {
+        return Ok(None);
+    };
+    if expires_at <= Utc::now() {
+        store.clear_cached_unlocked_vault_key()?;
+        return Ok(None);
+    }
+    match VaultKey::from_hex(&vault_key_hex) {
+        Ok(vault_key) => Ok(Some(vault_key)),
+        Err(_) => {
+            store.clear_cached_unlocked_vault_key()?;
+            Ok(None)
+        }
+    }
+}
+
+fn cache_tui_vault_key(store: &TodoStore, vault_key: &VaultKey) -> Result<()> {
+    store.save_cached_unlocked_vault_key(
+        &vault_key.to_hex(),
+        Utc::now() + ChronoDuration::seconds(TUI_UNLOCK_CACHE_TTL_SECS),
+    )
 }
 
 fn prompt_new_master_password() -> Result<String> {
@@ -2022,6 +2081,9 @@ fn run_app(
     tui_vault_key: Option<VaultKey>,
 ) -> Result<()> {
     let mut auto_sync = AutoSync::new(tui_vault_key);
+    if auto_sync.enabled() {
+        run_tui_sync(&mut app, &mut auto_sync, "startup sync")?;
+    }
     loop {
         terminal.draw(|frame| draw(frame, &app))?;
 
