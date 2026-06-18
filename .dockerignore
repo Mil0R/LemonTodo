@@ -1,0 +1,13 @@
+.git
+target
+node_modules
+apps/web/node_modules
+apps/web/dist
+apps/web/tsconfig.tsbuildinfo
+apps/web/tsconfig.node.tsbuildinfo
+coverage
+*.log
+screenshot-*.png
+.env
+.env.*
+!.env.example

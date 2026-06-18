@@ -8,6 +8,7 @@ export default defineConfig({
     port: 4173,
     proxy: {
       "/v1": "http://127.0.0.1:8787",
+      "/login": "http://127.0.0.1:8787",
       "/register": "http://127.0.0.1:8787",
     },
   },

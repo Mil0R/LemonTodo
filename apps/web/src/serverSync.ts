@@ -7,6 +7,7 @@ const BASELINE_KEY_PREFIX = "lemontodo.web.baseline";
 const TOKEN_KEY = "lemontodo.web.token";
 const TOKEN_EXPIRY_KEY = "lemontodo.web.token_expires_at";
 const UNLOCK_KEY_PREFIX = "lemontodo.web.unlock";
+const MASTER_PASSWORD_HANDOFF_KEY = "lemontodo.web.master_password_once";
 const WEB_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const WEB_UNLOCK_TTL_MS = 1000 * 60 * 60 * 12;
 
@@ -261,6 +262,12 @@ export function readCachedVaultKey(accountEmail: string): string | null {
     window.localStorage.removeItem(unlockKey(accountEmail));
     return null;
   }
+}
+
+export function readMasterPasswordHandoff(): string | null {
+  const masterPassword = window.sessionStorage.getItem(MASTER_PASSWORD_HANDOFF_KEY);
+  window.sessionStorage.removeItem(MASTER_PASSWORD_HANDOFF_KEY);
+  return masterPassword;
 }
 
 export function clearCachedVaultKey(accountEmail: string): void {

@@ -8,6 +8,7 @@ import {
   pushWorkspaceSnapshot,
   readCachedVaultKey,
   readAccessTokenFromLocation,
+  readMasterPasswordHandoff,
   unlockVaultKey,
   type AccountStatus,
 } from "./serverSync";
@@ -65,7 +66,9 @@ function App() {
         const cachedVaultKey = readCachedVaultKey(nextAccount.email);
         let unlockedVaultKey = cachedVaultKey;
         if (!unlockedVaultKey) {
-          const masterPassword = window.prompt("Master password is required to unlock Web sync.");
+          const masterPassword =
+            readMasterPasswordHandoff() ??
+            window.prompt("Master password is required to unlock Web sync.");
           if (!masterPassword) {
             dispatch({
               type: "set_sync_status",
@@ -782,8 +785,8 @@ function contentFingerprint(state: WorkspaceState) {
 }
 
 function serverLoginUrl() {
-  const base = import.meta.env.VITE_LEMONTODO_SERVER_URL ?? "http://127.0.0.1:8787";
-  return new URL("/", base).toString();
+  const base = import.meta.env.VITE_LEMONTODO_SERVER_URL ?? window.location.origin;
+  return new URL("/login", base).toString();
 }
 
 function formatClock(value: string) {

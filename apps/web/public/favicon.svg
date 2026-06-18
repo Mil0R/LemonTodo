@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="LemonTodo">
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 18a25 25 0 0 0 50 0" fill="#acd64b" stroke="#54b85d" stroke-width="4"/>
+    <path d="M11 18a21 21 0 0 0 42 0" stroke="#eef7bf" stroke-width="2.6"/>
+    <path d="M15 18a17 17 0 0 0 34 0" fill="#acd64b" stroke="#dff0a4" stroke-width="1.8"/>
+    <path d="M32 18H13M32 18 16 31M32 18 23 38M32 18v23M32 18l9 20M32 18l16 13M32 18h19" stroke="#dff0a4" stroke-width="1.8"/>
+  </g>
+</svg>

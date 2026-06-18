@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::State,
-    http::{Response, StatusCode, header},
+    http::{Response, StatusCode, Uri, header},
     response::Html,
     routing::get,
 };
@@ -35,7 +35,8 @@ const DEFAULT_HOST: &str = "0.0.0.0";
 const DEFAULT_PORT: u16 = 8787;
 const DEFAULT_SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 const DEFAULT_REGISTER_WASM_DIR: &str = "target/register-wasm";
-const DEFAULT_WEB_CLIENT_URL: &str = "http://127.0.0.1:4173/";
+const DEFAULT_WEB_STATIC_DIR: &str = "apps/web/dist";
+const DEFAULT_WEB_CLIENT_URL: &str = "/";
 const REGISTER_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -144,10 +145,6 @@ const REGISTER_HTML: &str = r##"<!doctype html>
         Master password
         <input id="master-password" name="master-password" type="password" autocomplete="new-password" minlength="8" required>
       </label>
-      <label>
-        Confirm master password
-        <input id="confirm-password" name="confirm-password" type="password" autocomplete="new-password" minlength="8" required>
-      </label>
       <button id="submit" type="submit">Create account</button>
     </form>
     <div id="status" role="status"></div>
@@ -156,8 +153,10 @@ const REGISTER_HTML: &str = r##"<!doctype html>
     const form = document.querySelector("#register-form");
     const submit = document.querySelector("#submit");
     const status = document.querySelector("#status");
+    const MASTER_PASSWORD_HANDOFF_KEY = "lemontodo.web.master_password_once";
     let wasmReady = false;
     let buildRegisterRequest;
+    let buildLoginRequest;
 
     function setStatus(message) {
       status.textContent = message;
@@ -169,7 +168,11 @@ const REGISTER_HTML: &str = r##"<!doctype html>
       if (typeof wasm.build_register_request !== "function") {
         throw new Error("registration bundle is outdated");
       }
+      if (typeof wasm.build_login_request !== "function") {
+        throw new Error("login bundle is outdated");
+      }
       buildRegisterRequest = wasm.build_register_request;
+      buildLoginRequest = wasm.build_login_request;
       wasmReady = true;
     } catch (error) {
       setStatus("Registration assets are not built on this server. Run ./scripts/build-register-wasm.sh.");
@@ -183,11 +186,6 @@ const REGISTER_HTML: &str = r##"<!doctype html>
 
       const email = document.querySelector("#email").value.trim();
       const masterPassword = document.querySelector("#master-password").value;
-      const confirmation = document.querySelector("#confirm-password").value;
-      if (masterPassword !== confirmation) {
-        setStatus("Master passwords do not match.");
-        return;
-      }
 
       submit.disabled = true;
       setStatus("Creating account...");
@@ -205,7 +203,20 @@ const REGISTER_HTML: &str = r##"<!doctype html>
           }
           throw new Error(message || "Registration failed.");
         }
-        window.location.assign("/?registered=1");
+        setStatus("Signing in...");
+        const loginResponse = await fetch("/v1/account/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: buildLoginRequest(email, masterPassword, "browser")
+        });
+        if (!loginResponse.ok) {
+          throw new Error(await loginResponse.text() || "Login after registration failed.");
+        }
+        const session = await loginResponse.json();
+        sessionStorage.setItem(MASTER_PASSWORD_HANDOFF_KEY, masterPassword);
+        const next = new URL(__WEB_CLIENT_URL_JSON__, window.location.origin);
+        next.searchParams.set("access_token", session.access_token);
+        window.location.assign(next.toString());
       } catch (error) {
         setStatus(error.message || "Registration failed.");
       } finally {
@@ -348,6 +359,7 @@ const LOGIN_HTML_TEMPLATE: &str = r##"<!doctype html>
     const form = document.querySelector("#login-form");
     const submit = document.querySelector("#submit");
     const status = document.querySelector("#status");
+    const MASTER_PASSWORD_HANDOFF_KEY = "lemontodo.web.master_password_once";
     let wasmReady = false;
     let buildLoginRequest;
 
@@ -394,7 +406,8 @@ const LOGIN_HTML_TEMPLATE: &str = r##"<!doctype html>
         }
         const session = await response.json();
         sessionStorage.setItem("lemontodo_console_token", session.access_token);
-        const next = new URL(__WEB_CLIENT_URL_JSON__);
+        sessionStorage.setItem(MASTER_PASSWORD_HANDOFF_KEY, masterPassword);
+        const next = new URL(__WEB_CLIENT_URL_JSON__, window.location.origin);
         next.searchParams.set("access_token", session.access_token);
         window.location.assign(next.toString());
       } catch (error) {
@@ -473,7 +486,7 @@ const REGISTRATION_DISABLED_HTML: &str = r##"<!doctype html>
   <main>
     <p class="kicker">self-hosted account</p>
     <h1>Registration is disabled</h1>
-    <a href="/">Back to login</a>
+    <a href="/login">Back to login</a>
   </main>
 </body>
 </html>
@@ -489,6 +502,7 @@ pub struct ServerConfig {
     pub admin_email: Option<String>,
     pub admin_password: Option<String>,
     pub register_wasm_dir: PathBuf,
+    pub web_static_dir: PathBuf,
     pub web_client_url: String,
 }
 
@@ -528,10 +542,17 @@ impl ServerConfig {
         let admin_email = lookup("LEMONTODO_ADMIN_EMAIL")
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let admin_password = lookup("LEMONTODO_ADMIN_PASSWORD").filter(|value| !value.is_empty());
+        let admin_password = read_optional_secret(
+            &mut lookup,
+            "LEMONTODO_ADMIN_PASSWORD",
+            "LEMONTODO_ADMIN_PASSWORD_FILE",
+        )?;
         let register_wasm_dir = lookup("LEMONTODO_REGISTER_WASM_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_REGISTER_WASM_DIR));
+        let web_static_dir = lookup("LEMONTODO_WEB_STATIC_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_WEB_STATIC_DIR));
         let web_client_url = lookup("LEMONTODO_WEB_CLIENT_URL")
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
@@ -546,6 +567,7 @@ impl ServerConfig {
             admin_email,
             admin_password,
             register_wasm_dir,
+            web_static_dir,
             web_client_url,
         })
     }
@@ -1128,7 +1150,8 @@ pub struct HealthResponse {
 
 pub fn app(state: AppState) -> Router {
     Router::new()
-        .route("/", get(login_page))
+        .route("/", get(web_client_index))
+        .route("/login", get(login_page))
         .route("/console", get(console_page))
         .route("/healthz", get(healthz))
         .route("/register", get(register_page))
@@ -1154,6 +1177,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/v1/sync/push", axum::routing::post(sync_push))
         .route("/v1/sync/pull", axum::routing::post(sync_pull))
+        .route("/{*path}", get(web_client_asset))
         .with_state(state)
 }
 
@@ -1200,12 +1224,18 @@ async fn console_page(
     }
 }
 
-async fn register_page(State(state): State<AppState>) -> Html<&'static str> {
+async fn register_page(State(state): State<AppState>) -> Html<String> {
     if state.config.allow_registration {
-        Html(REGISTER_HTML)
+        Html(register_html(&state.config.web_client_url))
     } else {
-        Html(REGISTRATION_DISABLED_HTML)
+        Html(REGISTRATION_DISABLED_HTML.to_owned())
     }
+}
+
+fn register_html(web_client_url: &str) -> String {
+    let web_client_url_json =
+        serde_json::to_string(web_client_url).unwrap_or_else(|_| "\"/\"".to_owned());
+    REGISTER_HTML.replace("__WEB_CLIENT_URL_JSON__", &web_client_url_json)
 }
 
 fn login_html(allow_registration: bool, web_client_url: &str) -> String {
@@ -1307,7 +1337,7 @@ fn console_html(email: &str) -> String {
       <dt>Account</dt>
       <dd>{escaped_email}</dd>
     </dl>
-    <a href="/">Back to login</a>
+    <a href="/login">Back to login</a>
   </main>
 </body>
 </html>
@@ -1391,7 +1421,7 @@ fn console_error_html(message: &str) -> String {
     <p class="kicker">console</p>
     <h1>Console unavailable</h1>
     <p>{escaped_message}</p>
-    <a href="/">Back to login</a>
+    <a href="/login">Back to login</a>
   </main>
 </body>
 </html>
@@ -1448,6 +1478,79 @@ fn register_asset_response(
                 format!("failed to build asset response: {error}"),
             )
         })
+}
+
+async fn web_client_index(
+    State(state): State<AppState>,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    static_asset_response(state.config.web_static_dir.join("index.html"))
+}
+
+async fn web_client_asset(
+    State(state): State<AppState>,
+    uri: Uri,
+) -> Result<Response<Body>, (StatusCode, String)> {
+    let request_path = uri.path().trim_start_matches('/');
+    let relative_path = if request_path.is_empty() {
+        PathBuf::from("index.html")
+    } else {
+        PathBuf::from(request_path)
+    };
+    if relative_path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err((StatusCode::BAD_REQUEST, "invalid asset path".to_owned()));
+    }
+
+    let asset_path = state.config.web_static_dir.join(&relative_path);
+    if asset_path.is_file() {
+        return static_asset_response(asset_path);
+    }
+
+    static_asset_response(state.config.web_static_dir.join("index.html"))
+}
+
+fn static_asset_response(path: PathBuf) -> Result<Response<Body>, (StatusCode, String)> {
+    let bytes = std::fs::read(&path).map_err(|error| {
+        (
+            StatusCode::NOT_FOUND,
+            format!(
+                "web asset not found at {}; build apps/web or set LEMONTODO_WEB_STATIC_DIR ({error})",
+                path.display()
+            ),
+        )
+    })?;
+    let content_type = content_type_for_path(&path);
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(bytes))
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to build asset response: {error}"),
+            )
+        })
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("css") => "text/css; charset=utf-8",
+        Some("html") => "text/html; charset=utf-8",
+        Some("ico") => "image/x-icon",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("json") | Some("webmanifest") => "application/json; charset=utf-8",
+        Some("png") => "image/png",
+        Some("svg") => "image/svg+xml",
+        Some("wasm") => "application/wasm",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
@@ -1756,6 +1859,22 @@ fn default_database_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".lemontodo-server.db"))
 }
 
+fn read_optional_secret(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    value_key: &str,
+    file_key: &str,
+) -> Result<Option<String>> {
+    if let Some(path) = lookup(file_key)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        let value = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {file_key} at {path}"))?;
+        return Ok(Some(value.trim_end_matches(['\r', '\n']).to_owned()));
+    }
+    Ok(lookup(value_key).filter(|value| !value.is_empty()))
+}
+
 fn session_ttl(config: &ServerConfig) -> Duration {
     Duration::seconds(config.session_ttl_secs)
 }
@@ -1959,6 +2078,8 @@ mod tests {
         assert_eq!(config.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
         assert_eq!(config.admin_email, None);
         assert_eq!(config.admin_password, None);
+        assert_eq!(config.web_static_dir, PathBuf::from(DEFAULT_WEB_STATIC_DIR));
+        assert_eq!(config.web_client_url, DEFAULT_WEB_CLIENT_URL);
     }
 
     #[test]
@@ -1971,6 +2092,8 @@ mod tests {
             ("LEMONTODO_SESSION_TTL_SECS", "3600"),
             ("LEMONTODO_ADMIN_EMAIL", "admin@example.com"),
             ("LEMONTODO_ADMIN_PASSWORD", "dev-password"),
+            ("LEMONTODO_WEB_STATIC_DIR", "/srv/lemontodo/web"),
+            ("LEMONTODO_WEB_CLIENT_URL", "/"),
         ]);
 
         let config =
@@ -1985,6 +2108,27 @@ mod tests {
         assert_eq!(config.session_ttl_secs, 3600);
         assert_eq!(config.admin_email, Some("admin@example.com".to_owned()));
         assert_eq!(config.admin_password, Some("dev-password".to_owned()));
+        assert_eq!(config.web_static_dir, PathBuf::from("/srv/lemontodo/web"));
+        assert_eq!(config.web_client_url, "/");
+    }
+
+    #[test]
+    fn loads_admin_password_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let password_path = dir.path().join("admin_password");
+        std::fs::write(&password_path, "file-secret\n").unwrap();
+        let env = HashMap::from([
+            (
+                "LEMONTODO_ADMIN_PASSWORD_FILE",
+                password_path.to_str().unwrap(),
+            ),
+            ("LEMONTODO_ADMIN_PASSWORD", "ignored-dev-secret"),
+        ]);
+
+        let config =
+            ServerConfig::from_lookup(|key| env.get(key).map(ToString::to_string)).unwrap();
+
+        assert_eq!(config.admin_password, Some("file-secret".to_owned()));
     }
 
     #[test]
@@ -2841,6 +2985,7 @@ mod tests {
             admin_email: None,
             admin_password: None,
             register_wasm_dir: PathBuf::from(DEFAULT_REGISTER_WASM_DIR),
+            web_static_dir: PathBuf::from(DEFAULT_WEB_STATIC_DIR),
             web_client_url: DEFAULT_WEB_CLIENT_URL.to_owned(),
         }
     }

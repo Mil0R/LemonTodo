@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">LemonTodo icon</title>
+  <desc id="desc">A flat transparent-background green lemon slice with simple citrus segments.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path
+      d="M54 142a202 202 0 0 0 404 0"
+      fill="#acd64b"
+      stroke="#54b85d"
+      stroke-width="18"
+    />
+    <path
+      d="M84 142a172 172 0 0 0 344 0"
+      stroke="#eef7bf"
+      stroke-width="12"
+    />
+    <path
+      d="M118 142a138 138 0 0 0 276 0"
+      fill="#acd64b"
+      stroke="#dff0a4"
+      stroke-width="7"
+    />
+    <path d="M256 142 98 142" stroke="#dff0a4" stroke-width="7"/>
+    <path d="M256 142 125 247" stroke="#dff0a4" stroke-width="7"/>
+    <path d="M256 142 184 306" stroke="#dff0a4" stroke-width="7"/>
+    <path d="M256 142v186" stroke="#dff0a4" stroke-width="7"/>
+    <path d="M256 142 328 306" stroke="#dff0a4" stroke-width="7"/>
+    <path d="M256 142 387 247" stroke="#dff0a4" stroke-width="7"/>
+    <path d="M256 142h158" stroke="#dff0a4" stroke-width="7"/>
+  </g>
+</svg>
