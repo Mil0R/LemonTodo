@@ -28,6 +28,7 @@ use lemontodo_sync::{
     unpack_operation,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     app::{App, Mode, parse_due_input},
@@ -39,6 +40,13 @@ const TUI_AUTO_SYNC_INTERVAL: Duration = Duration::from_secs(10);
 const TUI_AUTO_SYNC_DEBOUNCE: Duration = Duration::from_secs(5);
 const TUI_AUTO_SYNC_LIMIT: u32 = 100;
 const TUI_UNLOCK_CACHE_TTL_SECS: i64 = 60 * 60 * 12;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ActiveAccount {
+    server_url: String,
+    email: String,
+    db_path: PathBuf,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "ltd")]
@@ -544,7 +552,7 @@ fn main() -> Result<()> {
             master_password,
             server_url,
         }) => {
-            run_login_command(&store, email, master_password, server_url)?;
+            run_login_command(&store, email, master_password, server_url, &db_path)?;
         }
         Some(Command::Logout {
             local_only,
@@ -596,7 +604,7 @@ fn main() -> Result<()> {
                     master_password,
                     server_url,
                 } => {
-                    run_login_command(&store, email, master_password, server_url)?;
+                    run_login_command(&store, email, master_password, server_url, &db_path)?;
                 }
                 SyncCommand::Connect {
                     email,
@@ -1146,6 +1154,7 @@ fn run_login_command(
     email: Option<String>,
     master_password: Option<String>,
     server_url: Option<String>,
+    db_path: &PathBuf,
 ) -> Result<()> {
     let server_url = match server_url {
         Some(server_url) => Some(server_url),
@@ -1182,6 +1191,14 @@ fn run_login_command(
     store.save_sync_server_url(server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL))?;
     store.save_sync_account_email(&response.email)?;
     store.save_sync_access_token(&response.access_token)?;
+    save_active_account(ActiveAccount {
+        server_url: server_url
+            .as_deref()
+            .unwrap_or(DEFAULT_SERVER_URL)
+            .to_owned(),
+        email: response.email.clone(),
+        db_path: db_path.clone(),
+    })?;
     let encrypted = store
         .encrypted_vault_key()?
         .context("local vault metadata is not initialized after login")?;
@@ -2372,6 +2389,9 @@ fn progress_bar(stats: TaskStats, width: usize) -> String {
 }
 
 fn default_db_path() -> PathBuf {
+    if let Some(path) = active_account_db_path() {
+        return path;
+    }
     dirs::data_dir()
         .context("failed to locate user data directory")
         .map(|path| path.join("lemontodo").join("lemontodo.db"))
@@ -2486,6 +2506,29 @@ fn account_db_path(server_url: &str, email: &str) -> PathBuf {
                 .join(safe_path_component(email))
                 .join("lemontodo.db")
         })
+}
+
+fn active_account_db_path() -> Option<PathBuf> {
+    let path = active_account_path();
+    let raw = fs::read_to_string(path).ok()?;
+    let active = serde_json::from_str::<ActiveAccount>(&raw).ok()?;
+    Some(active.db_path)
+}
+
+fn save_active_account(active: ActiveAccount) -> Result<()> {
+    let path = active_account_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(&active)?;
+    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn active_account_path() -> PathBuf {
+    dirs::data_dir()
+        .map(|path| path.join("lemontodo").join("active-account.json"))
+        .unwrap_or_else(|| PathBuf::from(".lemontodo").join("active-account.json"))
 }
 
 fn safe_path_component(value: &str) -> String {
