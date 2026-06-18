@@ -400,10 +400,10 @@ enum VaultCommand {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let db_path = cli
-        .db
-        .unwrap_or_else(|| default_db_path_for_command(&cli.command));
+    let mut cli = Cli::parse();
+    let db_path = cli.db.unwrap_or_else(|| {
+        resolve_default_db_path_for_command(&mut cli.command).unwrap_or_else(default_db_path)
+    });
     let store = TodoStore::open(&db_path)?;
 
     match cli.command {
@@ -2406,6 +2406,67 @@ fn default_db_path_for_command(command: &Option<Command>) -> PathBuf {
         }
         _ => default_db_path(),
     }
+}
+
+fn resolve_default_db_path_for_command(command: &mut Option<Command>) -> Option<PathBuf> {
+    match command {
+        Some(Command::Login {
+            email, server_url, ..
+        })
+        | Some(Command::Sync {
+            command: Some(SyncCommand::Login {
+                email, server_url, ..
+            }),
+            ..
+        }) => resolve_login_account_db_path(email, server_url),
+        Some(Command::Sync {
+            command:
+                Some(SyncCommand::Connect {
+                    email, server_url, ..
+                }),
+            ..
+        }) => {
+            let email = email.as_ref()?;
+            let server_url = server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL);
+            Some(account_db_path(server_url, email))
+        }
+        _ => Some(default_db_path_for_command(command)),
+    }
+}
+
+fn resolve_login_account_db_path(
+    email: &mut Option<String>,
+    server_url: &mut Option<String>,
+) -> Option<PathBuf> {
+    let server_url = match server_url {
+        Some(value) => value.trim().to_owned(),
+        None if io::stdin().is_terminal() => {
+            let input = prompt_text(&format!("Server [{DEFAULT_SERVER_URL}]: ")).ok()?;
+            let resolved = if input.trim().is_empty() {
+                DEFAULT_SERVER_URL.to_owned()
+            } else {
+                input.trim().to_owned()
+            };
+            *server_url = Some(resolved.clone());
+            resolved
+        }
+        None => DEFAULT_SERVER_URL.to_owned(),
+    };
+
+    let email = match email {
+        Some(value) => value.trim().to_owned(),
+        None if io::stdin().is_terminal() => {
+            let input = prompt_text("Account email: ").ok()?;
+            let resolved = input.trim().to_owned();
+            *email = Some(resolved.clone());
+            resolved
+        }
+        None => return None,
+    };
+    if email.is_empty() {
+        return None;
+    }
+    Some(account_db_path(&server_url, &email))
 }
 
 fn account_db_path(server_url: &str, email: &str) -> PathBuf {
