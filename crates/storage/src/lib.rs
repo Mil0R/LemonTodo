@@ -55,7 +55,6 @@ impl TodoStore {
         store.migrate()?;
         store.ensure_device_id()?;
         store.backfill_operation_device_ids()?;
-        store.ensure_inbox()?;
         Ok(store)
     }
 
@@ -75,7 +74,7 @@ impl TodoStore {
 
         let list_id = match project_name {
             Some(project_name) => self.find_project_by_name(project_name)?.id,
-            None => self.inbox_id()?,
+            None => self.ensure_inbox()?.id,
         };
         let now = Utc::now();
         let task = Task {
@@ -750,7 +749,7 @@ impl TodoStore {
 
         let Some(project_name) = project_name else {
             let sql = format!(
-                "{} WHERE {} ORDER BY status = 'done', sort_key ASC",
+                "{} WHERE {} ORDER BY sort_key ASC",
                 select_task_sql(),
                 status_filter
             );
@@ -763,7 +762,7 @@ impl TodoStore {
 
         let project = self.find_project_by_name(project_name)?;
         let sql = format!(
-            "{} WHERE {} AND list_id = ?1 ORDER BY status = 'done', sort_key ASC",
+            "{} WHERE {} AND list_id = ?1 ORDER BY sort_key ASC",
             select_task_sql(),
             status_filter
         );
@@ -775,7 +774,7 @@ impl TodoStore {
 
     fn list_lists(&self) -> Result<Vec<List>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, revision, created_at, updated_at FROM lists ORDER BY name ASC",
+            "SELECT id, name, revision, created_at, updated_at FROM lists ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_list)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -784,7 +783,7 @@ impl TodoStore {
 
     fn list_all_tasks(&self) -> Result<Vec<Task>> {
         let sql = format!(
-            "{} WHERE deleted_at IS NULL ORDER BY status = 'done', sort_key ASC",
+            "{} WHERE deleted_at IS NULL ORDER BY sort_key ASC",
             select_task_sql()
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -808,7 +807,7 @@ impl TodoStore {
                     OR lower(note_markdown) LIKE ?1
                     OR lower(tags) LIKE ?1
                 )
-             ORDER BY status = 'done', sort_key ASC",
+             ORDER BY sort_key ASC",
             select_task_sql()
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1271,6 +1270,7 @@ impl TodoStore {
 
     fn ensure_inbox(&self) -> Result<List> {
         if let Some(list) = self.find_list_by_name("Inbox")? {
+            self.ensure_inbox_operation(&list)?;
             return Ok(list);
         }
 
@@ -1287,13 +1287,31 @@ impl TodoStore {
             ],
         )?;
 
+        self.ensure_inbox_operation(&list)?;
+
         Ok(list)
     }
 
-    fn inbox_id(&self) -> Result<Uuid> {
-        self.find_list_by_name("Inbox")?
-            .map(|list| list.id)
-            .context("Inbox list is missing")
+    fn ensure_inbox_operation(&self, list: &List) -> Result<()> {
+        let exists = self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM operations
+                WHERE object_id = ?1 AND object_type = ?2
+            )",
+            params![list.id.to_string(), ObjectType::List.as_str()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+
+        self.record_operation(
+            list.id,
+            ObjectType::List,
+            OperationType::Create,
+            json!({ "list": list }),
+        )?;
+        Ok(())
     }
 
     fn find_project_by_name(&self, name: &str) -> Result<List> {
@@ -1379,11 +1397,24 @@ impl TodoStore {
 
     fn apply_remote_list_create(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
         let list = remote_operation_payload::<List>(&remote.operation, "list")?;
-        if self.find_list_by_id(list.id)?.is_some() || self.find_list_by_name(&list.name)?.is_some()
-        {
+        if self.find_list_by_id(list.id)?.is_some() {
             return Ok(RemoteApplyResult::Conflict(
-                "list id or name already exists locally",
+                "list id already exists locally",
             ));
+        }
+
+        if let Some(existing) = self.find_list_by_name(&list.name)? {
+            if self.can_replace_placeholder_inbox(&existing)? {
+                self.discard_pending_local_operations(existing.id)?;
+                self.conn.execute(
+                    "DELETE FROM lists WHERE id = ?1",
+                    params![existing.id.to_string()],
+                )?;
+            } else {
+                return Ok(RemoteApplyResult::Conflict(
+                    "list name already exists locally",
+                ));
+            }
         }
 
         self.conn.execute(
@@ -1399,6 +1430,23 @@ impl TodoStore {
         )?;
         self.mark_remote_operation_applied(remote.id)?;
         Ok(RemoteApplyResult::Applied)
+    }
+
+    fn can_replace_placeholder_inbox(&self, list: &List) -> Result<bool> {
+        if list.name != "Inbox" || self.has_active_tasks_for_list(list.id)? {
+            return Ok(false);
+        }
+
+        let pending = self.pending_operations()?;
+        let pending_for_list = pending
+            .iter()
+            .filter(|operation| operation.object_id == list.id)
+            .collect::<Vec<_>>();
+        if pending_for_list.len() != 1 || !is_inbox_bootstrap_operation(pending_for_list[0]) {
+            return Ok(false);
+        }
+
+        Ok(pending.iter().all(is_inbox_bootstrap_operation))
     }
 
     fn apply_remote_list_update(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
@@ -1468,16 +1516,20 @@ impl TodoStore {
     }
 
     fn apply_remote_task_create(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
-        let task = remote_operation_payload::<Task>(&remote.operation, "task")?;
+        let mut task = remote_operation_payload::<Task>(&remote.operation, "task")?;
         if self.find_task_any_by_id(task.id)?.is_some() {
             return Ok(RemoteApplyResult::Conflict(
                 "task id already exists locally",
             ));
         }
         if self.find_list_by_id(task.list_id)?.is_none() {
-            return Ok(RemoteApplyResult::Skipped(
-                "task list does not exist locally yet",
-            ));
+            if let Some(inbox_id) = self.unique_inbox_id()? {
+                task.list_id = inbox_id;
+            } else {
+                return Ok(RemoteApplyResult::Skipped(
+                    "task list does not exist locally yet",
+                ));
+            }
         }
 
         self.conn.execute(
@@ -1502,6 +1554,20 @@ impl TodoStore {
         )?;
         self.mark_remote_operation_applied(remote.id)?;
         Ok(RemoteApplyResult::Applied)
+    }
+
+    fn unique_inbox_id(&self) -> Result<Option<Uuid>> {
+        let inboxes = self
+            .list_lists()?
+            .into_iter()
+            .filter(|list| list.name == "Inbox")
+            .map(|list| list.id)
+            .collect::<Vec<_>>();
+        Ok(if inboxes.len() == 1 {
+            Some(inboxes[0])
+        } else {
+            None
+        })
     }
 
     fn apply_remote_task_update(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
@@ -1559,7 +1625,7 @@ impl TodoStore {
 
     fn apply_remote_snapshot_import(&self, remote: &RemoteOperation) -> Result<RemoteApplyResult> {
         let snapshot = remote_operation_payload::<TodoSnapshot>(&remote.operation, "snapshot")?;
-        if self.pending_operations()?.is_empty() {
+        if !self.has_substantive_pending_operations()? {
             self.import_snapshot_internal(snapshot, false)?;
             self.mark_remote_operation_applied(remote.id)?;
             return Ok(RemoteApplyResult::Applied);
@@ -1567,6 +1633,15 @@ impl TodoStore {
         Ok(RemoteApplyResult::Conflict(
             "local device has pending unsynced operations",
         ))
+    }
+
+    fn has_substantive_pending_operations(&self) -> Result<bool> {
+        for operation in self.pending_operations()? {
+            if !is_inbox_bootstrap_operation(&operation) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn mark_remote_operation_applied(&self, id: Uuid) -> Result<()> {
@@ -1815,6 +1890,19 @@ fn row_to_remote_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteOp
     })
 }
 
+fn is_inbox_bootstrap_operation(operation: &Operation) -> bool {
+    if operation.object_type != ObjectType::List || operation.operation_type != OperationType::Create
+    {
+        return false;
+    }
+
+    operation
+        .payload
+        .get("list")
+        .and_then(|payload| serde_json::from_value::<List>(payload.clone()).ok())
+        .is_some_and(|list| list.id == operation.object_id && list.name == "Inbox")
+}
+
 fn select_task_sql() -> &'static str {
     "SELECT id, list_id, revision, title, note_markdown, status, tags, due_date,
             sort_key, created_at, updated_at, deleted_at
@@ -1972,8 +2060,10 @@ mod tests {
         let task = store.add_task(NewTask::new("Ship MVP")).unwrap();
         assert_eq!(task.status, TaskStatus::Open);
         assert_eq!(task.revision, 1);
-        assert_eq!(store.pending_operations().unwrap().len(), 1);
-        assert_eq!(store.pending_operations().unwrap()[0].object_revision, 1);
+        let pending = store.pending_operations().unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(is_inbox_bootstrap_operation(&pending[0]));
+        assert_eq!(pending[1].object_revision, 1);
 
         let open_tasks = store.list_tasks(false).unwrap();
         assert_eq!(open_tasks.len(), 1);
@@ -2055,11 +2145,12 @@ mod tests {
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].title, "Export me");
         assert_eq!(imported[0].note_markdown, "Snapshot note");
-        assert_eq!(target.pending_operations().unwrap().len(), 1);
-        assert_eq!(
-            target.pending_operations().unwrap()[0].operation_type,
-            OperationType::ImportSnapshot
-        );
+        let operations = target.pending_operations().unwrap();
+        assert_eq!(operations.len(), 2);
+        assert!(operations.iter().any(|operation| is_inbox_bootstrap_operation(operation)));
+        assert!(operations.iter().any(|operation| {
+            operation.operation_type == OperationType::ImportSnapshot
+        }));
     }
 
     #[test]
@@ -2174,14 +2265,15 @@ mod tests {
         assert_eq!(updated.revision, 2);
 
         let operations = store.pending_operations().unwrap();
-        assert_eq!(operations.len(), 2);
+        assert_eq!(operations.len(), 3);
         assert!(
             operations
                 .iter()
                 .all(|operation| operation.device_id == device_id)
         );
-        assert_eq!(operations[0].object_revision, 1);
-        assert_eq!(operations[1].object_revision, 2);
+        assert!(is_inbox_bootstrap_operation(&operations[0]));
+        assert_eq!(operations[1].object_revision, 1);
+        assert_eq!(operations[2].object_revision, 2);
 
         let acknowledged = store
             .mark_operations_synced(&[operations[0].id], Some("server-cursor-1"))
@@ -2191,12 +2283,12 @@ mod tests {
             store.last_sync_cursor().unwrap(),
             Some("server-cursor-1".to_owned())
         );
-        assert_eq!(store.pending_operations().unwrap().len(), 1);
+        assert_eq!(store.pending_operations().unwrap().len(), 2);
 
         let acknowledged = store
             .mark_pending_operations_synced(Some("server-cursor-2"))
             .unwrap();
-        assert_eq!(acknowledged, 1);
+        assert_eq!(acknowledged, 2);
         assert!(store.pending_operations().unwrap().is_empty());
         assert_eq!(
             store.last_sync_cursor().unwrap(),
@@ -2461,9 +2553,11 @@ mod tests {
     }
 
     #[test]
-    fn leaves_remote_task_create_pending_when_list_is_missing() {
+    fn maps_remote_task_create_to_unique_inbox_when_list_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+        let inbox = store.create_project("Inbox").unwrap();
+        store.mark_pending_operations_synced(None).unwrap();
         let task = Task {
             id: Uuid::new_v4(),
             list_id: Uuid::new_v4(),
@@ -2494,16 +2588,87 @@ mod tests {
             .save_remote_operations(std::slice::from_ref(&operation), "cursor-1")
             .unwrap();
         let summary = store.apply_pending_remote_operations().unwrap();
-        assert_eq!(summary.applied, 0);
-        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.applied, 1);
+        assert_eq!(summary.skipped, 0);
         assert_eq!(summary.conflicts, 0);
-        let pending = store.pending_remote_operations().unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].apply_status, "skipped");
-        assert_eq!(
-            pending[0].apply_reason,
-            Some("task list does not exist locally yet".to_owned())
-        );
+        assert!(store.pending_remote_operations().unwrap().is_empty());
+        let tasks = store.list_tasks(true).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Missing Project Task");
+        assert_eq!(store.projects().unwrap().len(), 1);
+        assert_eq!(store.projects().unwrap()[0].id, inbox.id);
+        assert_eq!(store.projects().unwrap()[0].name, "Inbox");
+    }
+
+    #[test]
+    fn replaces_placeholder_inbox_with_remote_inbox_and_applies_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("lemontodo.db")).unwrap();
+
+        let remote_inbox = List {
+            id: Uuid::new_v4(),
+            name: "Inbox".to_owned(),
+            revision: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let remote_task = Task {
+            id: Uuid::new_v4(),
+            list_id: remote_inbox.id,
+            revision: 1,
+            title: "Welcome to LemonTodo".to_owned(),
+            note_markdown: "Remote starter task".to_owned(),
+            status: TaskStatus::Open,
+            tags: vec!["sample".to_owned()],
+            due_date: None,
+            sort_key: "0001".to_owned(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+        };
+        let operations = vec![
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: remote_inbox.id,
+                object_revision: remote_inbox.revision,
+                object_type: ObjectType::List,
+                operation_type: OperationType::Create,
+                payload: json!({ "list": remote_inbox }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+            Operation {
+                id: Uuid::new_v4(),
+                device_id: Uuid::new_v4(),
+                object_id: remote_task.id,
+                object_revision: remote_task.revision,
+                object_type: ObjectType::Task,
+                operation_type: OperationType::Create,
+                payload: json!({ "task": remote_task }),
+                created_at: Utc::now(),
+                synced_at: None,
+            },
+        ];
+
+        store
+            .save_remote_operations(&operations, "cursor-1")
+            .unwrap();
+        let summary = store.apply_pending_remote_operations().unwrap();
+        assert_eq!(summary.applied, 2);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.conflicts, 0);
+        assert_eq!(store.pending_remote_operation_count().unwrap(), 0);
+
+        let lists = store.projects().unwrap();
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].id, remote_inbox.id);
+        assert_eq!(lists[0].name, "Inbox");
+
+        let tasks = store.list_tasks(true).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].list_id, remote_inbox.id);
+        assert_eq!(tasks[0].title, "Welcome to LemonTodo");
     }
 
     #[test]
@@ -2914,7 +3079,13 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Updated Remotely");
         assert_eq!(tasks[0].revision, 3);
-        assert!(store.pending_operations().unwrap().is_empty());
+        assert!(
+            store
+                .pending_operations()
+                .unwrap()
+                .iter()
+                .all(is_inbox_bootstrap_operation)
+        );
     }
 
     #[test]
@@ -3020,7 +3191,7 @@ mod tests {
         assert_eq!(pending[0].apply_status, "conflict");
         assert_eq!(
             pending[0].apply_reason,
-            Some("list id or name already exists locally".to_owned())
+            Some("list name already exists locally".to_owned())
         );
         let conflicts = store.pending_remote_conflicts().unwrap();
         assert_eq!(conflicts.len(), 1);

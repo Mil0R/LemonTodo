@@ -1,9 +1,13 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import {
   cacheUnlockedVaultKey,
+  clearAccountClientState,
   clearWebSession,
   clearCachedVaultKey,
+  consumeRegisteredAccountReset,
   fetchAccount,
+  loginWithMasterPassword,
+  logoutFromServer,
   pullWorkspaceSnapshot,
   pushWorkspaceSnapshot,
   readCachedVaultKey,
@@ -13,8 +17,11 @@ import {
   type AccountStatus,
 } from "./serverSync";
 import {
+  createBlankWorkspace,
+  createSeedWorkspace,
   loadWorkspace,
   persistWorkspace,
+  resetLegacyWebStorage,
   workspaceStorageKey,
   workspaceReducer,
   type DraftTask,
@@ -24,16 +31,21 @@ import {
 } from "./workspace";
 
 function App() {
+  resetLegacyWebStorage();
   const [state, dispatch] = useReducer(workspaceReducer, undefined, loadWorkspace);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [account, setAccount] = useState<AccountStatus | null>(null);
   const [vaultKeyHex, setVaultKeyHex] = useState<string | null>(null);
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
+  const [isSubmittingLogin, setIsSubmittingLogin] = useState(false);
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
   const pullInFlight = useRef(false);
   const latestState = useRef<WorkspaceState>(state);
   const latestAccount = useRef<AccountStatus | null>(null);
   const latestAccessToken = useRef<string | null>(null);
   const latestVaultKeyHex = useRef<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const projectInputRef = useRef<HTMLInputElement | null>(null);
   latestState.current = state;
   latestAccount.current = account;
   latestAccessToken.current = accessToken;
@@ -50,83 +62,7 @@ function App() {
   }, [state.revision, state.savedRevision, state.sync.enabled, account?.email, accessToken]);
 
   useEffect(() => {
-    const token = readAccessTokenFromLocation();
-    if (!token) {
-      dispatch({
-        type: "set_sync_status",
-        status: "locked",
-        message: "Log in on the server to enable sync",
-      });
-      return;
-    }
-    setAccessToken(token);
-    fetchAccount(token)
-      .then(async (nextAccount) => {
-        setAccount(nextAccount);
-        const cachedVaultKey = readCachedVaultKey(nextAccount.email);
-        let unlockedVaultKey = cachedVaultKey;
-        if (!unlockedVaultKey) {
-          const masterPassword =
-            readMasterPasswordHandoff() ??
-            window.prompt("Master password is required to unlock Web sync.");
-          if (!masterPassword) {
-            dispatch({
-              type: "set_sync_status",
-              status: "locked",
-              message: "Vault locked",
-            });
-            return;
-          }
-          unlockedVaultKey = await unlockVaultKey(token, masterPassword);
-          cacheUnlockedVaultKey(nextAccount.email, unlockedVaultKey);
-        }
-        setVaultKeyHex(unlockedVaultKey);
-        const storageKey = workspaceStorageKey(nextAccount.email);
-        const localWorkspace = loadWorkspace(storageKey);
-        dispatch({ type: "hydrate", snapshot: localWorkspace });
-        dispatch({
-          type: "set_sync_status",
-          status: "syncing",
-          message: "Checking server workspace",
-        });
-        const remoteWorkspace = await pullWorkspaceSnapshot(
-          token,
-          nextAccount.email,
-          unlockedVaultKey,
-          localWorkspace,
-        );
-        if (remoteWorkspace) {
-          const hydrated = createSavedSnapshot(remoteWorkspace, new Date().toISOString());
-          persistWorkspace(hydrated, storageKey);
-          dispatch({ type: "hydrate", snapshot: hydrated });
-          dispatch({
-            type: "set_sync_status",
-            status: "saved",
-            message: "Server workspace loaded",
-          });
-        } else {
-          persistWorkspace(localWorkspace, storageKey);
-          dispatch({
-            type: "set_sync_status",
-            status: "saved",
-            message: "Logged in, local workspace ready",
-          });
-        }
-      })
-      .catch((error: Error) => {
-        clearWebSession();
-        if (account?.email) {
-          clearCachedVaultKey(account.email);
-        }
-        setAccessToken(null);
-        setAccount(null);
-        setVaultKeyHex(null);
-        dispatch({
-          type: "set_sync_status",
-          status: "offline",
-          message: error.message || "Login session failed",
-        });
-      });
+    void bootstrapSession();
   }, []);
 
   useEffect(() => {
@@ -184,6 +120,19 @@ function App() {
   useEffect(() => {
     const handleTaskShortcut = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      if (event.key === "Escape") {
+        const searchFocused = document.activeElement === searchInputRef.current;
+        if (searchFocused) {
+          event.preventDefault();
+          searchInputRef.current?.blur();
+          return;
+        }
+        if (latestState.current.selectedTaskId) {
+          event.preventDefault();
+          dispatch({ type: "select_task", taskId: null });
+        }
         return;
       }
       if (isTypingTarget(event.target)) {
@@ -371,6 +320,14 @@ function App() {
   }
 
   function handleProjectNew() {
+    dispatch({ type: "set_project_draft", value: "" });
+    window.requestAnimationFrame(() => {
+      projectInputRef.current?.focus();
+      projectInputRef.current?.select();
+    });
+  }
+
+  function handleProjectCreate() {
     dispatch({ type: "new_project" });
   }
 
@@ -380,6 +337,171 @@ function App() {
 
   function handleProjectRemove() {
     dispatch({ type: "remove_project" });
+  }
+
+  async function bootstrapSession(masterPasswordHint?: string) {
+    setIsBootstrapping(true);
+    setAuthMessage(null);
+    const token = readAccessTokenFromLocation();
+    if (!token) {
+      setAccessToken(null);
+      setAccount(null);
+      setVaultKeyHex(null);
+      dispatch({ type: "hydrate", snapshot: loadWorkspace() });
+      dispatch({
+        type: "set_sync_status",
+        status: "locked",
+        message: "Log in to enable sync",
+      });
+      setIsBootstrapping(false);
+      return;
+    }
+
+    try {
+      setAccessToken(token);
+      const nextAccount = await fetchAccount(token);
+      setAccount(nextAccount);
+      const shouldSeedRegisteredAccount = consumeRegisteredAccountReset(nextAccount.email);
+      if (shouldSeedRegisteredAccount) {
+        clearAccountClientState(nextAccount.email);
+      }
+      const cachedVaultKey = readCachedVaultKey(nextAccount.email);
+      let unlockedVaultKey = cachedVaultKey;
+      if (!unlockedVaultKey) {
+        const masterPassword =
+          masterPasswordHint ??
+          readMasterPasswordHandoff() ??
+          window.prompt("Master password is required to unlock Web sync.");
+        if (!masterPassword) {
+          throw new Error("Vault locked");
+        }
+        unlockedVaultKey = await unlockVaultKey(token, masterPassword);
+        cacheUnlockedVaultKey(nextAccount.email, unlockedVaultKey);
+      }
+      setVaultKeyHex(unlockedVaultKey);
+      const storageKey = workspaceStorageKey(nextAccount.email);
+      const localWorkspace = shouldSeedRegisteredAccount
+        ? createBlankWorkspace()
+        : loadWorkspace(storageKey);
+      dispatch({ type: "hydrate", snapshot: localWorkspace });
+      dispatch({
+        type: "set_sync_status",
+        status: "syncing",
+        message: "Checking server workspace",
+      });
+      const remoteWorkspace = await pullWorkspaceSnapshot(
+        token,
+        nextAccount.email,
+        unlockedVaultKey,
+        localWorkspace,
+      );
+      if (remoteWorkspace) {
+        const hydrated = createSavedSnapshot(remoteWorkspace, new Date().toISOString());
+        persistWorkspace(hydrated, storageKey);
+        dispatch({ type: "hydrate", snapshot: hydrated });
+        dispatch({
+          type: "set_sync_status",
+          status: "saved",
+          message: "Server workspace loaded",
+        });
+      } else if (shouldSeedRegisteredAccount) {
+        const seededWorkspace = createSeedWorkspace();
+        persistWorkspace(seededWorkspace, storageKey);
+        dispatch({ type: "hydrate", snapshot: seededWorkspace });
+        await pushWorkspaceSnapshot(
+          token,
+          nextAccount.email,
+          unlockedVaultKey,
+          seededWorkspace,
+        );
+        const hydrated = createSavedSnapshot(seededWorkspace, new Date().toISOString());
+        persistWorkspace(hydrated, storageKey);
+        dispatch({ type: "hydrate", snapshot: hydrated });
+        dispatch({
+          type: "set_sync_status",
+          status: "saved",
+          message: "Starter workspace created",
+        });
+      } else {
+        persistWorkspace(localWorkspace, storageKey);
+        dispatch({
+          type: "set_sync_status",
+          status: "saved",
+          message: "Logged in, local workspace ready",
+        });
+      }
+    } catch (error) {
+      clearWebSession();
+      setAccessToken(null);
+      setAccount(null);
+      setVaultKeyHex(null);
+      dispatch({ type: "hydrate", snapshot: loadWorkspace() });
+      dispatch({
+        type: "set_sync_status",
+        status: "locked",
+        message: error instanceof Error ? error.message : "Login session failed",
+      });
+      setAuthMessage(error instanceof Error ? error.message : "Login session failed");
+    } finally {
+      setIsBootstrapping(false);
+    }
+  }
+
+  async function handleLogin(email: string, masterPassword: string) {
+    setIsSubmittingLogin(true);
+    setAuthMessage(null);
+    try {
+      await loginWithMasterPassword(email, masterPassword);
+      await bootstrapSession(masterPassword);
+      window.history.replaceState({}, "", window.location.pathname);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "Login failed");
+    } finally {
+      setIsSubmittingLogin(false);
+    }
+  }
+
+  async function handleLogout() {
+    const token = latestAccessToken.current;
+    const email = latestAccount.current?.email ?? null;
+    setIsBootstrapping(true);
+    setAuthMessage(null);
+    try {
+      if (token) {
+        await logoutFromServer(token);
+      } else {
+        clearWebSession();
+      }
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "Logout failed");
+    } finally {
+      if (email) {
+        clearCachedVaultKey(email);
+      }
+      setAccessToken(null);
+      setAccount(null);
+      setVaultKeyHex(null);
+      dispatch({ type: "hydrate", snapshot: loadWorkspace() });
+      dispatch({
+        type: "set_sync_status",
+        status: "locked",
+        message: "Logged out",
+      });
+      window.history.replaceState({}, "", window.location.pathname);
+      setIsBootstrapping(false);
+    }
+  }
+
+  const isAuthenticated = Boolean(account && accessToken && vaultKeyHex);
+
+  if (!isAuthenticated) {
+    return (
+      <AuthScreen
+        busy={isBootstrapping || isSubmittingLogin}
+        message={authMessage}
+        onLogin={handleLogin}
+      />
+    );
   }
 
   return (
@@ -415,11 +537,9 @@ function App() {
           <button className="button button-ghost" onClick={handleNewTask}>
             + Task
           </button>
-          {!account ? (
-            <a className="button button-ghost" href={serverLoginUrl()}>
-              Login
-            </a>
-          ) : null}
+          <button className="button button-ghost" onClick={handleLogout}>
+            Logout
+          </button>
           <button className="button button-primary" onClick={() => syncState("manual")}>
             ↻ Sync
           </button>
@@ -438,6 +558,7 @@ function App() {
 
           <div className="project-editor">
             <input
+              ref={projectInputRef}
               className="terminal-input"
               value={state.projectDraft}
               onChange={(event) =>
@@ -446,6 +567,9 @@ function App() {
               placeholder="Project name"
             />
             <div className="project-actions">
+              <button className="button button-ghost" onClick={handleProjectCreate}>
+                Create
+              </button>
               <button className="button button-ghost" onClick={handleProjectRename}>
                 Rename
               </button>
@@ -703,6 +827,75 @@ function TaskInspector(props: {
   );
 }
 
+function AuthScreen(props: {
+  busy: boolean;
+  message: string | null;
+  onLogin: (email: string, masterPassword: string) => Promise<void>;
+}) {
+  const [email, setEmail] = useState("");
+  const [masterPassword, setMasterPassword] = useState("");
+
+  return (
+    <div className="auth-shell">
+      <main className="auth-panel">
+        <div className="auth-copy">
+          <div className="brand-kicker">LemonTodo</div>
+          <h1>Login</h1>
+          <p>Sign in here, then enter the encrypted workspace directly.</p>
+        </div>
+
+        <form
+          className="auth-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void props.onLogin(email.trim(), masterPassword);
+          }}
+        >
+          <label className="field">
+            <span>Email</span>
+            <input
+              className="terminal-input"
+              type="email"
+              autoComplete="username"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="you@example.com"
+              required
+              autoFocus
+            />
+          </label>
+
+          <label className="field">
+            <span>Master password</span>
+            <input
+              className="terminal-input"
+              type="password"
+              autoComplete="current-password"
+              value={masterPassword}
+              onChange={(event) => setMasterPassword(event.target.value)}
+              placeholder="Vault unlock secret"
+              required
+            />
+          </label>
+
+          <div className="auth-actions">
+            <button className="button button-primary" type="submit" disabled={props.busy}>
+              {props.busy ? "Checking..." : "Log in"}
+            </button>
+            <a className="button button-ghost" href="/register">
+              Register
+            </a>
+          </div>
+        </form>
+
+        <div className="auth-status" aria-live="polite">
+          {props.message ?? "Server identity stays local to this host."}
+        </div>
+      </main>
+    </div>
+  );
+}
+
 function StatusChip({
   tone,
   children,
@@ -738,13 +931,11 @@ function filterTasks(tasks: Task[], query: string, projectId: string | null) {
         task.tags.some((tag) => tag.toLowerCase().includes(needle))
       );
     })
-    .sort((left, right) => {
-      if (left.status !== right.status) {
-        const order = { open: 0, done: 1, archived: 2 } as const;
-        return order[left.status] - order[right.status];
-      }
-      return right.updatedAt.localeCompare(left.updatedAt);
-    });
+    .sort((left, right) =>
+      left.createdAt !== right.createdAt
+        ? left.createdAt.localeCompare(right.createdAt)
+        : left.id.localeCompare(right.id),
+    );
 }
 
 function isTypingTarget(target: EventTarget | null) {
@@ -782,11 +973,6 @@ function contentFingerprint(state: WorkspaceState) {
     projects: [...state.projects].sort((left, right) => left.id.localeCompare(right.id)),
     tasks: [...state.tasks].sort((left, right) => left.id.localeCompare(right.id)),
   };
-}
-
-function serverLoginUrl() {
-  const base = import.meta.env.VITE_LEMONTODO_SERVER_URL ?? window.location.origin;
-  return new URL("/login", base).toString();
 }
 
 function formatClock(value: string) {

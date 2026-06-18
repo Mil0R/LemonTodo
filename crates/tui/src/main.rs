@@ -1204,7 +1204,21 @@ fn run_login_command(
         .context("local vault metadata is not initialized after login")?;
     let vault_key = unwrap_vault_key(&encrypted, &master_password)?;
     cache_tui_vault_key(store, &vault_key)?;
+    let pulled = pull_remote_operations_with_vault_key(
+        store,
+        &vault_key,
+        server_url.as_deref().unwrap_or(DEFAULT_SERVER_URL),
+        100,
+    )?;
+    let saved = store.save_remote_operations(&pulled.operations, &pulled.cursor)?;
+    let applied = store.apply_pending_remote_operations()?;
     println!("Logged in as {}", response.email);
+    if saved > 0 || applied.applied > 0 {
+        println!(
+            "Imported {} remote changes and applied {} safe updates",
+            saved, applied.applied
+        );
+    }
     Ok(())
 }
 

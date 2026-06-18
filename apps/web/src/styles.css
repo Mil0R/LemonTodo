@@ -37,6 +37,10 @@ body {
   overflow: hidden;
 }
 
+a {
+  color: inherit;
+}
+
 button,
 input,
 select,
@@ -55,6 +59,64 @@ button {
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: var(--gap);
   padding: 10px;
+}
+
+.auth-shell {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at top left, rgba(63, 185, 80, 0.12), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(63, 185, 80, 0.08), transparent 32%),
+    var(--bg);
+}
+
+.auth-panel {
+  width: min(440px, 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.auth-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.auth-copy h1,
+.auth-copy p {
+  margin: 0;
+}
+
+.auth-copy h1 {
+  font-size: 1.15rem;
+  line-height: 1.2;
+}
+
+.auth-copy p,
+.auth-status {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.auth-form,
+.auth-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.auth-actions {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.auth-actions .button {
+  width: 100%;
 }
 
 .topbar,
@@ -335,7 +397,7 @@ button {
 }
 
 .task-list {
-  grid-auto-rows: 34px;
+  grid-auto-rows: 38px;
 }
 
 .project-item,
@@ -382,6 +444,7 @@ button {
   display: flex;
   align-items: center;
   min-width: 0;
+  min-height: 38px;
 }
 
 .task-line {
@@ -400,7 +463,8 @@ button {
 
 .task-title {
   font-weight: 500;
-  line-height: 1;
+  line-height: 1.25;
+  padding-bottom: 1px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -505,6 +569,14 @@ button {
 @media (max-width: 840px) {
   .app-shell {
     padding: 10px;
+  }
+
+  .auth-shell {
+    padding: 10px;
+  }
+
+  .auth-actions {
+    grid-template-columns: 1fr;
   }
 
   .topbar {

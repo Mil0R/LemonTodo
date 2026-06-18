@@ -1,4 +1,4 @@
-import type { WorkspaceState } from "./workspace";
+import { workspaceStorageKey, type WorkspaceState } from "./workspace";
 
 const PROTOCOL_VERSION = 1;
 const DEVICE_ID_KEY = "lemontodo.web.device_id";
@@ -8,6 +8,7 @@ const TOKEN_KEY = "lemontodo.web.token";
 const TOKEN_EXPIRY_KEY = "lemontodo.web.token_expires_at";
 const UNLOCK_KEY_PREFIX = "lemontodo.web.unlock";
 const MASTER_PASSWORD_HANDOFF_KEY = "lemontodo.web.master_password_once";
+const REGISTER_RESET_ACCOUNT_KEY = "lemontodo.web.reset_account_once";
 const WEB_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const WEB_UNLOCK_TTL_MS = 1000 * 60 * 60 * 12;
 
@@ -16,6 +17,12 @@ export interface AccountStatus {
   email: string;
   is_admin: boolean;
   has_vault_key: boolean;
+}
+
+export interface LoginSession {
+  user_id: string;
+  email: string;
+  access_token: string;
 }
 
 interface VaultMetadataResponse {
@@ -122,6 +129,39 @@ export async function fetchAccount(accessToken: string): Promise<AccountStatus> 
     throw new Error((await response.text()) || "Session check failed.");
   }
   return response.json() as Promise<AccountStatus>;
+}
+
+export async function loginWithMasterPassword(
+  email: string,
+  masterPassword: string,
+): Promise<LoginSession> {
+  const wasm = await loadRegisterWasm();
+  if (typeof wasm.build_login_request !== "function") {
+    throw new Error("Login bundle is outdated.");
+  }
+  const response = await fetch("/v1/account/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: wasm.build_login_request(email, masterPassword, "browser"),
+  });
+  if (!response.ok) {
+    throw new Error((await response.text()) || "Login failed.");
+  }
+  const session = (await response.json()) as LoginSession;
+  persistAccessToken(session.access_token);
+  return session;
+}
+
+export async function logoutFromServer(accessToken: string): Promise<void> {
+  const response = await fetch("/v1/account/logout", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ access_token: accessToken }),
+  });
+  clearWebSession();
+  if (!response.ok) {
+    throw new Error((await response.text()) || "Logout failed.");
+  }
 }
 
 export async function unlockVaultKey(
@@ -270,8 +310,29 @@ export function readMasterPasswordHandoff(): string | null {
   return masterPassword;
 }
 
+export function markRegisteredAccountForReset(accountEmail: string): void {
+  window.sessionStorage.setItem(REGISTER_RESET_ACCOUNT_KEY, accountEmail.trim().toLowerCase());
+}
+
+export function consumeRegisteredAccountReset(accountEmail: string): boolean {
+  const expected = accountEmail.trim().toLowerCase();
+  const value = window.sessionStorage.getItem(REGISTER_RESET_ACCOUNT_KEY);
+  if (value !== expected) {
+    return false;
+  }
+  window.sessionStorage.removeItem(REGISTER_RESET_ACCOUNT_KEY);
+  return true;
+}
+
 export function clearCachedVaultKey(accountEmail: string): void {
   window.localStorage.removeItem(unlockKey(accountEmail));
+}
+
+export function clearAccountClientState(accountEmail: string): void {
+  window.localStorage.removeItem(cursorKey(accountEmail));
+  window.localStorage.removeItem(baselineKey(accountEmail));
+  window.localStorage.removeItem(unlockKey(accountEmail));
+  window.localStorage.removeItem(workspaceStorageKey(accountEmail));
 }
 
 function buildPushPlan(workspace: WorkspaceState, baseline: TodoSnapshot | null): PushPlan {
@@ -314,6 +375,12 @@ function diffSnapshot(
   }
   for (const list of baseline.lists) {
     if (!nextLists.has(list.id)) {
+      const retainedByName = current.lists.some(
+        (entry) => entry.id !== list.id && normalizeListName(entry.name) === normalizeListName(list.name),
+      );
+      if (retainedByName) {
+        continue;
+      }
       const deletedAt = new Date().toISOString();
       operations.push(
         createOperation(
@@ -494,19 +561,24 @@ function applyRemoteTask(snapshot: TodoSnapshot, operation: SyncOperation): Todo
   if (!payload) {
     return snapshot;
   }
-  const tasks = snapshot.tasks.some((task) => task.id === payload.id)
-    ? snapshot.tasks.map((task) => (task.id === payload.id ? payload : task))
-    : [...snapshot.tasks, payload];
-  const lists = snapshot.lists.some((list) => list.id === payload.list_id)
+  const inbox = uniqueInboxList(snapshot.lists);
+  const normalizedPayload =
+    !snapshot.lists.some((list) => list.id === payload.list_id) && inbox
+      ? { ...payload, list_id: inbox.id }
+      : payload;
+  const tasks = snapshot.tasks.some((task) => task.id === normalizedPayload.id)
+    ? snapshot.tasks.map((task) => (task.id === normalizedPayload.id ? normalizedPayload : task))
+    : [...snapshot.tasks, normalizedPayload];
+  const lists = snapshot.lists.some((list) => list.id === normalizedPayload.list_id)
     ? snapshot.lists
     : [
         ...snapshot.lists,
         {
-          id: payload.list_id,
-          name: "Imported",
+          id: normalizedPayload.list_id,
+          name: snapshot.lists.length === 0 ? "Inbox" : "Imported",
           revision: 1,
-          created_at: payload.created_at,
-          updated_at: payload.updated_at,
+          created_at: normalizedPayload.created_at,
+          updated_at: normalizedPayload.updated_at,
         },
       ];
   return {
@@ -618,12 +690,12 @@ function snapshotToWorkspace(
   snapshot: TodoSnapshot,
   previous: WorkspaceState,
 ): WorkspaceState {
-  const projects = sortProjects(snapshot.lists.map((list) => ({ id: list.id, name: list.name })));
+  const { projects, canonicalListIds } = canonicalizeProjects(snapshot.lists);
   const tasks = snapshot.tasks
     .filter((task) => task.deleted_at === null)
     .map((task) => ({
       id: task.id,
-      projectId: task.list_id,
+      projectId: canonicalListIds.get(task.list_id) ?? task.list_id,
       title: task.title,
       note: task.note_markdown,
       tags: normalizeTags(task.tags),
@@ -672,6 +744,41 @@ function snapshotToWorkspace(
     projects,
     tasks: sortWorkspaceTasks(tasks),
     sync: { ...previous.sync },
+  };
+}
+
+function canonicalizeProjects(lists: TodoList[]): {
+  projects: Array<{ id: string; name: string; createdAt: string }>;
+  canonicalListIds: Map<string, string>;
+} {
+  const canonicalByName = new Map<string, TodoList>();
+  const canonicalListIds = new Map<string, string>();
+
+  for (const list of [...lists].sort((left, right) => {
+    if (left.created_at !== right.created_at) {
+      return left.created_at.localeCompare(right.created_at);
+    }
+    return left.id.localeCompare(right.id);
+  })) {
+    const key = list.name.trim().toLowerCase();
+    const canonical = canonicalByName.get(key);
+    if (!canonical) {
+      canonicalByName.set(key, list);
+      canonicalListIds.set(list.id, list.id);
+      continue;
+    }
+    canonicalListIds.set(list.id, canonical.id);
+  }
+
+  return {
+    projects: sortProjects(
+      [...canonicalByName.values()].map((list) => ({
+        id: list.id,
+        name: list.name,
+        createdAt: list.created_at,
+      })),
+    ),
+    canonicalListIds,
   };
 }
 
@@ -881,15 +988,26 @@ function normalizeTags(tags: string[]): string[] {
 }
 
 function sortLists(lists: TodoList[]): TodoList[] {
-  return [...lists].sort((left, right) => left.name.localeCompare(right.name));
+  return [...lists].sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
 
-function sortProjects(projects: Array<{ id: string; name: string }>): Array<{ id: string; name: string }> {
-  return [...projects].sort((left, right) => left.name.localeCompare(right.name));
+function sortProjects(
+  projects: Array<{ id: string; name: string; createdAt: string }>,
+): Array<{ id: string; name: string; createdAt: string }> {
+  return [...projects].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function uniqueInboxList(lists: TodoList[]): TodoList | null {
+  const matches = lists.filter((list) => normalizeListName(list.name) === "inbox");
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function normalizeListName(name: string): string {
+  return name.trim().toLowerCase();
 }
 
 function sortTasks(tasks: TodoTask[]): TodoTask[] {
-  return [...tasks].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  return [...tasks].sort((left, right) => left.created_at.localeCompare(right.created_at));
 }
 
 function sortWorkspaceTasks(
@@ -905,12 +1023,11 @@ function sortWorkspaceTasks(
     updatedAt: string;
   }>,
 ) {
-  const order = { open: 0, done: 1, archived: 2 } as const;
   return [...tasks].sort((left, right) => {
-    if (left.status !== right.status) {
-      return order[left.status] - order[right.status];
+    if (left.createdAt !== right.createdAt) {
+      return left.createdAt.localeCompare(right.createdAt);
     }
-    return right.updatedAt.localeCompare(left.updatedAt);
+    return left.id.localeCompare(right.id);
   });
 }
 
@@ -920,6 +1037,7 @@ function cloneSnapshot(snapshot: TodoSnapshot): TodoSnapshot {
 
 async function loadRegisterWasm(): Promise<{
   default: (input: string) => Promise<void>;
+  build_login_request?: (email: string, masterPassword: string, deviceName: string) => string;
   unwrap_vault_key_hex: (encryptedVaultKeyJson: string, masterPassword: string) => string;
   encrypt_payload: (vaultKeyHex: string, plaintext: string, aad: string) => string;
   decrypt_payload: (vaultKeyHex: string, envelopeJson: string, aad: string) => string;

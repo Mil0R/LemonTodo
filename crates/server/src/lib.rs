@@ -154,6 +154,7 @@ const REGISTER_HTML: &str = r##"<!doctype html>
     const submit = document.querySelector("#submit");
     const status = document.querySelector("#status");
     const MASTER_PASSWORD_HANDOFF_KEY = "lemontodo.web.master_password_once";
+    const REGISTER_RESET_ACCOUNT_KEY = "lemontodo.web.reset_account_once";
     let wasmReady = false;
     let buildRegisterRequest;
     let buildLoginRequest;
@@ -214,6 +215,7 @@ const REGISTER_HTML: &str = r##"<!doctype html>
         }
         const session = await loginResponse.json();
         sessionStorage.setItem(MASTER_PASSWORD_HANDOFF_KEY, masterPassword);
+        sessionStorage.setItem(REGISTER_RESET_ACCOUNT_KEY, email.toLowerCase());
         const next = new URL(__WEB_CLIENT_URL_JSON__, window.location.origin);
         next.searchParams.set("access_token", session.access_token);
         window.location.assign(next.toString());

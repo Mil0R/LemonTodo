@@ -3,6 +3,7 @@ export type TaskStatus = "open" | "done" | "archived";
 export interface Project {
   id: string;
   name: string;
+  createdAt: string;
 }
 
 export interface Task {
@@ -82,6 +83,7 @@ type WorkspaceAction =
   | { type: "load_task_into_draft"; taskId: string | null };
 
 const STORAGE_KEY = "lemontodo.web.workspace.v1";
+const STORAGE_RESET_MARKER_KEY = "lemontodo.web.storage_reset.v3";
 
 export function workspaceStorageKey(email?: string | null): string {
   const account = email?.trim().toLowerCase();
@@ -90,25 +92,25 @@ export function workspaceStorageKey(email?: string | null): string {
 
 export function createSeedWorkspace(): WorkspaceState {
   const inbox = createProject("Inbox");
-  const projectAlpha = createProject("Alpha");
-  const projectBeta = createProject("Beta");
-  const tasks = [
-    createTask(inbox.id, "Review sync status", "Confirm that session sync is green.", ["sync", "mvp"], "2026-06-18", "open"),
-    createTask(projectAlpha.id, "Refine project rail", "Keep the list compact on narrow screens.", ["ui"], "", "open"),
-    createTask(projectAlpha.id, "Check mobile spacing", "Tune inspector and list density for iPad.", ["responsive"], "2026-06-21", "done"),
-    createTask(projectBeta.id, "Task editor polish", "Keep actions reachable with one hand.", ["ux", "web"], "", "open"),
-  ];
+  const sampleTask = createTask(
+    inbox.id,
+    "Welcome to LemonTodo",
+    "This is the only seeded example task for a brand new account.",
+    ["sample"],
+    "",
+    "open",
+  );
 
   return {
     revision: 1,
     savedRevision: 1,
     currentProjectId: inbox.id,
-    selectedTaskId: tasks[0]?.id ?? null,
+    selectedTaskId: sampleTask.id,
     search: "",
     projectDraft: inbox.name,
-    draft: taskToDraft(tasks[0], inbox.id),
-    projects: [inbox, projectAlpha, projectBeta],
-    tasks,
+    draft: taskToDraft(sampleTask, inbox.id),
+    projects: [inbox],
+    tasks: [sampleTask],
     sync: {
       enabled: true,
       status: "saved",
@@ -118,21 +120,66 @@ export function createSeedWorkspace(): WorkspaceState {
   };
 }
 
+export function createBlankWorkspace(): WorkspaceState {
+  return {
+    revision: 1,
+    savedRevision: 1,
+    currentProjectId: "",
+    selectedTaskId: null,
+    search: "",
+    projectDraft: "",
+    draft: blankDraft(""),
+    projects: [],
+    tasks: [],
+    sync: {
+      enabled: true,
+      status: "saved",
+      message: "Ready",
+      lastSyncedAt: null,
+    },
+  };
+}
+
+export function resetLegacyWebStorage(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (window.localStorage.getItem(STORAGE_RESET_MARKER_KEY) === "done") {
+    return;
+  }
+
+  const localKeys = Object.keys(window.localStorage);
+  for (const key of localKeys) {
+    if (key.startsWith("lemontodo.web.") || key.startsWith(STORAGE_KEY)) {
+      window.localStorage.removeItem(key);
+    }
+  }
+
+  const sessionKeys = Object.keys(window.sessionStorage);
+  for (const key of sessionKeys) {
+    if (key.startsWith("lemontodo.web.") || key === "lemontodo_web_token") {
+      window.sessionStorage.removeItem(key);
+    }
+  }
+
+  window.localStorage.setItem(STORAGE_RESET_MARKER_KEY, "done");
+}
+
 export function loadWorkspace(storageKey = STORAGE_KEY): WorkspaceState {
   if (typeof window === "undefined") {
-    return createSeedWorkspace();
+    return createBlankWorkspace();
   }
 
   const raw = window.localStorage.getItem(storageKey);
   if (!raw) {
-    return createSeedWorkspace();
+    return createBlankWorkspace();
   }
 
   try {
     const snapshot = JSON.parse(raw) as WorkspaceSnapshot;
     return sanitizeSnapshot(snapshot);
   } catch {
-    return createSeedWorkspace();
+    return createBlankWorkspace();
   }
 }
 
@@ -230,7 +277,7 @@ export function workspaceReducer(
       }
       const project = createProject(name);
       return touch(state, {
-        projects: [...state.projects, project],
+        projects: [project, ...state.projects],
         currentProjectId: project.id,
         selectedTaskId: null,
         projectDraft: project.name,
@@ -500,9 +547,11 @@ function taskToDraft(task: Task, projectId: string): DraftTask {
 }
 
 function createProject(name: string): Project {
+  const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
     name,
+    createdAt: now,
   };
 }
 
@@ -536,17 +585,27 @@ function sanitizeSnapshot(snapshot: WorkspaceSnapshot): WorkspaceState {
     !snapshot.draft ||
     typeof snapshot.currentProjectId !== "string"
   ) {
-    return createSeedWorkspace();
+    return createBlankWorkspace();
+  }
+  if (looksLikeLegacyDemoWorkspace(snapshot)) {
+    return createBlankWorkspace();
   }
   const projectExists = snapshot.projects.some(
     (project) => project.id === snapshot.currentProjectId,
   );
+  const normalizedProjects = [...snapshot.projects]
+    .map((project) => ({
+      ...project,
+      createdAt: project.createdAt ?? new Date(0).toISOString(),
+    }))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   const currentProjectId = projectExists
     ? snapshot.currentProjectId
-    : snapshot.projects[0]?.id ?? crypto.randomUUID();
+    : normalizedProjects[0]?.id ?? crypto.randomUUID();
   const selectedTask = snapshot.tasks.find((task) => task.id === snapshot.selectedTaskId) ?? null;
   return {
     ...snapshot,
+    projects: normalizedProjects,
     currentProjectId,
     selectedTaskId: selectedTask?.id ?? null,
     draft: selectedTask
@@ -558,6 +617,22 @@ function sanitizeSnapshot(snapshot: WorkspaceSnapshot): WorkspaceState {
       message: snapshot.sync.message || "Ready",
     },
   };
+}
+
+function looksLikeLegacyDemoWorkspace(snapshot: WorkspaceSnapshot): boolean {
+  const projectNames = snapshot.projects.map((project) => project.name).sort();
+  const taskTitles = snapshot.tasks.map((task) => task.title).sort();
+  return (
+    projectNames.length === 3 &&
+    projectNames[0] === "Alpha" &&
+    projectNames[1] === "Beta" &&
+    projectNames[2] === "Inbox" &&
+    taskTitles.length === 4 &&
+    taskTitles[0] === "Check mobile spacing" &&
+    taskTitles[1] === "Refine project rail" &&
+    taskTitles[2] === "Review sync status" &&
+    taskTitles[3] === "Task editor polish"
+  );
 }
 
 export type { WorkspaceAction };
