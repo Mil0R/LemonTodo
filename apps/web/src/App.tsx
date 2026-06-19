@@ -39,6 +39,7 @@ function App() {
   const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [isSubmittingLogin, setIsSubmittingLogin] = useState(false);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
+  const [projectRemovePending, setProjectRemovePending] = useState(false);
   const pullInFlight = useRef(false);
   const latestState = useRef<WorkspaceState>(state);
   const latestAccount = useRef<AccountStatus | null>(null);
@@ -64,6 +65,10 @@ function App() {
   useEffect(() => {
     void bootstrapSession();
   }, []);
+
+  useEffect(() => {
+    setProjectRemovePending(false);
+  }, [state.currentProjectId]);
 
   useEffect(() => {
     const flushOnVisibility = () => {
@@ -320,6 +325,7 @@ function App() {
   }
 
   function handleProjectNew() {
+    setProjectRemovePending(false);
     dispatch({ type: "set_project_draft", value: "" });
     window.requestAnimationFrame(() => {
       projectInputRef.current?.focus();
@@ -328,15 +334,29 @@ function App() {
   }
 
   function handleProjectCreate() {
+    setProjectRemovePending(false);
     dispatch({ type: "new_project" });
   }
 
   function handleProjectRename() {
+    setProjectRemovePending(false);
     dispatch({ type: "rename_project" });
   }
 
   function handleProjectRemove() {
+    if (projects.length <= 1) {
+      return;
+    }
+    if (!projectRemovePending) {
+      setProjectRemovePending(true);
+      return;
+    }
+    setProjectRemovePending(false);
     dispatch({ type: "remove_project" });
+  }
+
+  function handleCancelProjectRemove() {
+    setProjectRemovePending(false);
   }
 
   async function bootstrapSession(masterPasswordHint?: string) {
@@ -368,15 +388,30 @@ function App() {
       const cachedVaultKey = readCachedVaultKey(nextAccount.email);
       let unlockedVaultKey = cachedVaultKey;
       if (!unlockedVaultKey) {
-        const masterPassword =
-          masterPasswordHint ??
-          readMasterPasswordHandoff() ??
-          window.prompt("Master password is required to unlock Web sync.");
+        const masterPassword = masterPasswordHint ?? readMasterPasswordHandoff();
         if (!masterPassword) {
-          throw new Error("Vault locked");
+          dispatch({
+            type: "set_sync_status",
+            status: "locked",
+            message: "Enter master password to unlock sync",
+          });
+          setIsBootstrapping(false);
+          return;
         }
-        unlockedVaultKey = await unlockVaultKey(token, masterPassword);
-        cacheUnlockedVaultKey(nextAccount.email, unlockedVaultKey);
+        try {
+          unlockedVaultKey = await unlockVaultKey(token, masterPassword);
+          cacheUnlockedVaultKey(nextAccount.email, unlockedVaultKey);
+        } catch (error) {
+          setVaultKeyHex(null);
+          dispatch({
+            type: "set_sync_status",
+            status: "locked",
+            message: "Master password required",
+          });
+          setAuthMessage(error instanceof Error ? error.message : "Vault unlock failed");
+          setIsBootstrapping(false);
+          return;
+        }
       }
       setVaultKeyHex(unlockedVaultKey);
       const storageKey = workspaceStorageKey(nextAccount.email);
@@ -461,6 +496,19 @@ function App() {
     }
   }
 
+  async function handleUnlock(masterPassword: string) {
+    setIsSubmittingLogin(true);
+    setAuthMessage(null);
+    try {
+      await bootstrapSession(masterPassword);
+      window.history.replaceState({}, "", window.location.pathname);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "Unlock failed");
+    } finally {
+      setIsSubmittingLogin(false);
+    }
+  }
+
   async function handleLogout() {
     const token = latestAccessToken.current;
     const email = latestAccount.current?.email ?? null;
@@ -492,7 +540,20 @@ function App() {
     }
   }
 
+  const hasSession = Boolean(account && accessToken);
   const isAuthenticated = Boolean(account && accessToken && vaultKeyHex);
+
+  if (hasSession && !vaultKeyHex) {
+    return (
+      <UnlockScreen
+        busy={isBootstrapping || isSubmittingLogin}
+        email={account?.email ?? ""}
+        message={authMessage}
+        onUnlock={handleUnlock}
+        onLogout={handleLogout}
+      />
+    );
+  }
 
   if (!isAuthenticated) {
     return (
@@ -573,10 +634,36 @@ function App() {
               <button className="button button-ghost" onClick={handleProjectRename}>
                 Rename
               </button>
-              <button className="button button-ghost" onClick={handleProjectRemove}>
-                Remove
+              <button
+                className="button button-ghost"
+                onClick={handleProjectRemove}
+                disabled={projects.length <= 1}
+              >
+                {projectRemovePending ? "Confirm remove" : "Remove"}
               </button>
             </div>
+
+            {projectRemovePending ? (
+              <div className="delete-confirmation" role="status" aria-live="polite">
+                <div className="delete-confirmation-copy">
+                  <strong>Delete this project?</strong>
+                  <span>
+                    Tasks move to{" "}
+                    {projects.find((project) => project.id !== selectedProject?.id)?.name ??
+                      "the fallback project"}
+                    .
+                  </span>
+                </div>
+                <div className="delete-confirmation-actions">
+                  <button className="button button-danger" onClick={handleProjectRemove}>
+                    Confirm
+                  </button>
+                  <button className="button button-ghost" onClick={handleCancelProjectRemove}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="project-list" role="list" aria-label="Projects">
@@ -890,6 +977,73 @@ function AuthScreen(props: {
 
         <div className="auth-status" aria-live="polite">
           {props.message ?? "Server identity stays local to this host."}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function UnlockScreen(props: {
+  busy: boolean;
+  email: string;
+  message: string | null;
+  onUnlock: (masterPassword: string) => Promise<void>;
+  onLogout: () => Promise<void>;
+}) {
+  const [masterPassword, setMasterPassword] = useState("");
+
+  return (
+    <div className="auth-shell">
+      <main className="auth-panel">
+        <div className="auth-copy">
+          <div className="brand-kicker">LemonTodo</div>
+          <h1>Unlock Sync</h1>
+          <p>Enter the master password for {props.email} to unlock the encrypted workspace.</p>
+        </div>
+
+        <form
+          className="auth-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void props.onUnlock(masterPassword);
+          }}
+        >
+          <label className="field">
+            <span>Account</span>
+            <input className="terminal-input" value={props.email} readOnly />
+          </label>
+
+          <label className="field">
+            <span>Master password</span>
+            <input
+              className="terminal-input"
+              type="password"
+              autoComplete="current-password"
+              value={masterPassword}
+              onChange={(event) => setMasterPassword(event.target.value)}
+              placeholder="Vault unlock secret"
+              required
+              autoFocus
+            />
+          </label>
+
+          <div className="auth-actions">
+            <button className="button button-primary" type="submit" disabled={props.busy}>
+              {props.busy ? "Unlocking..." : "Unlock"}
+            </button>
+            <button
+              className="button button-ghost"
+              type="button"
+              onClick={() => void props.onLogout()}
+              disabled={props.busy}
+            >
+              Logout
+            </button>
+          </div>
+        </form>
+
+        <div className="auth-status" aria-live="polite">
+          {props.message ?? "Master password stays in this browser session only."}
         </div>
       </main>
     </div>

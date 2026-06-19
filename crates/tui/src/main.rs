@@ -2146,11 +2146,16 @@ fn run_app(
 }
 
 fn run_tui_sync(app: &mut App, auto_sync: &mut AutoSync, label: &str) -> Result<()> {
+    let silent = label == "auto-sync";
     let Some(vault_key) = auto_sync.vault_key().cloned() else {
-        app.set_message("sync: locked");
+        if !silent {
+            app.set_message("sync: locked");
+        }
         return Ok(());
     };
-    app.set_message(format!("{label}: syncing..."));
+    if !silent {
+        app.set_message(format!("{label}: syncing..."));
+    }
     let now = Instant::now();
     let server_url = configured_server_url(app.store(), None)?;
     match sync_now_with_vault_key(
@@ -2162,11 +2167,15 @@ fn run_tui_sync(app: &mut App, auto_sync: &mut AutoSync, label: &str) -> Result<
     ) {
         Ok(summary) => {
             app.refresh()?;
-            app.set_message(sync_summary_message(label, &summary));
+            if !silent {
+                app.set_message(sync_summary_message(label, &summary));
+            }
             auto_sync.finish_attempt(now, true);
         }
         Err(error) => {
-            app.set_message(format!("{label}: failed: {error}"));
+            if !silent {
+                app.set_message(format!("{label}: failed: {error}"));
+            }
             auto_sync.finish_attempt(now, false);
         }
     }
@@ -2175,7 +2184,7 @@ fn run_tui_sync(app: &mut App, auto_sync: &mut AutoSync, label: &str) -> Result<
 
 fn sync_summary_message(label: &str, summary: &SyncNowSummary) -> String {
     format!(
-        "{label}: ok pulled {} saved {} pushed {} conflicts {}",
+        "{label}: ok p{} s{} u{} c{}",
         summary.pulled.operations.len(),
         summary.saved,
         summary.pushed.accepted,

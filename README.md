@@ -217,26 +217,25 @@ Task editing commands are intended to be used inside the TUI. The old id-based r
 
 TUI controls:
 
-- `j` / `Down`: select next task
-- `k` / `Up`: select previous task
-- `[` / `]`: switch project filter
-- `v`: switch compact/detail view
-- `space`: toggle selected task done/open
-- `a`: add a task
-- `e`: edit selected task title
-- `n`: edit selected task note
-- `d`: edit selected task due date
-- `t`: edit selected task tags
-- `m`: move selected task to a project
-- `/`: search tasks
+- `j` / `k` or `Up` / `Down`: select task
+- `[` / `]`: switch project
+- `v`: compact/detail view
+- `space`: toggle done/open
+- `a`: add task
+- `e`: edit title
+- `n`: edit note
+- `d`: edit due date
+- `t`: edit tags
+- `m`: move to project
+- `x`: archive
+- `/`: search
 - `c`: clear search
-- `x`: archive selected task
-- `s`: show or hide local sync status
-- `S`: run sync immediately
-- `?`: show or hide full help
-- `Enter`: submit task while adding
-- `Esc`: close help/sync status or cancel input mode
 - `r`: refresh
+- `s`: sync status
+- `S`: sync now
+- `?`: toggle help
+- `Enter`: submit while adding
+- `Esc`: close help/sync status or cancel input mode
 - `q`: quit
 
 When a sync account is configured, opening the TUI prompts once for the master password to unlock auto-sync for the current session. Press Enter at that prompt to skip auto-sync. While unlocked, the TUI syncs on startup, after local edits with a short debounce, every 60 seconds while idle, and once before quit.

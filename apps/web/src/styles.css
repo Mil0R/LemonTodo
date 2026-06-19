@@ -280,6 +280,34 @@ button {
   gap: 8px;
 }
 
+.delete-confirmation {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(248, 81, 73, 0.28);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.delete-confirmation-copy {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.delete-confirmation-copy strong {
+  color: #ffb4ad;
+  font-size: 0.82rem;
+}
+
+.delete-confirmation-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .task-toolbar {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use lemontodo_core::{Task, TaskStatus};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
@@ -11,6 +11,28 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Mode, SyncStatus, ViewMode};
 
 const READY_MESSAGE: &str = "Ready";
+const COLOR_BG: Color = Color::Rgb(13, 17, 23);
+const COLOR_PANEL: Color = Color::Rgb(22, 27, 34);
+const COLOR_LINE: Color = Color::Rgb(48, 54, 61);
+const COLOR_TEXT: Color = Color::Rgb(230, 237, 243);
+const COLOR_MUTED: Color = Color::Rgb(139, 148, 158);
+const COLOR_GREEN: Color = Color::Rgb(63, 185, 80);
+
+fn text_style() -> Style {
+    Style::default().fg(COLOR_TEXT)
+}
+
+fn muted_style() -> Style {
+    Style::default().fg(COLOR_MUTED)
+}
+
+fn accent_style() -> Style {
+    Style::default().fg(COLOR_GREEN)
+}
+
+fn border_style() -> Style {
+    Style::default().fg(COLOR_LINE)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Viewport {
@@ -67,7 +89,12 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 
 fn draw_header(frame: &mut ratatui::Frame<'_>, area: Rect, lines: &[Line<'_>]) {
     let header = Paragraph::new(lines.to_vec())
-        .block(Block::default().borders(Borders::ALL))
+        .style(text_style().bg(COLOR_PANEL))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style()),
+        )
         .wrap(Wrap { trim: true });
     frame.render_widget(header, area);
 }
@@ -99,10 +126,16 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, viewport: V
     }
 
     let list = List::new(items)
-        .block(Block::default().title("Tasks").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title(Span::styled("Tasks", accent_style().add_modifier(Modifier::BOLD)))
+                .borders(Borders::ALL)
+                .border_style(border_style()),
+        )
         .highlight_style(
             Style::default()
-                .add_modifier(Modifier::REVERSED)
+                .bg(COLOR_GREEN)
+                .fg(COLOR_BG)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(match viewport {
@@ -115,7 +148,13 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, viewport: V
 fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, lines: &[Line<'_>]) {
     let title = footer_title(app.mode(), app.message(), app.search_query(), app.input());
     let footer = Paragraph::new(lines.to_vec())
-        .block(Block::default().title(title).borders(Borders::ALL))
+        .style(text_style().bg(COLOR_PANEL))
+        .block(
+            Block::default()
+                .title(Span::styled(title, accent_style().add_modifier(Modifier::BOLD)))
+                .borders(Borders::ALL)
+                .border_style(border_style()),
+        )
         .wrap(Wrap { trim: true });
     frame.render_widget(footer, area);
 }
@@ -130,15 +169,15 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, viewport: Viewport) {
                 "Move",
                 Style::default().add_modifier(Modifier::BOLD),
             )]),
-            Line::from("j/k or arrows  select"),
-            Line::from("[ ]           project"),
+            Line::from("j/k or arrows  select task"),
+            Line::from("[ ]           switch project"),
             Line::from("v             view"),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "Task",
                 Style::default().add_modifier(Modifier::BOLD),
             )]),
-            Line::from("space         toggle"),
+            Line::from("space         toggle done/open"),
             Line::from("a e n d t     add/edit"),
             Line::from("m x           move/archive"),
             Line::from(""),
@@ -225,7 +264,13 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, viewport: Viewport) {
     };
 
     let help = Paragraph::new(lines)
-        .block(Block::default().title("Help").borders(Borders::ALL))
+        .style(text_style().bg(COLOR_PANEL))
+        .block(
+            Block::default()
+                .title(Span::styled("Help", accent_style().add_modifier(Modifier::BOLD)))
+                .borders(Borders::ALL)
+                .border_style(border_style()),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(help, popup);
 }
@@ -325,7 +370,16 @@ fn draw_sync_status(
     };
 
     let status = Paragraph::new(lines)
-        .block(Block::default().title("Sync Status").borders(Borders::ALL))
+        .style(text_style().bg(COLOR_PANEL))
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    "Sync Status",
+                    accent_style().add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(border_style()),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(status, popup);
 }
@@ -333,44 +387,36 @@ fn draw_sync_status(
 fn sync_section<'a>(title: &'a str) -> Line<'a> {
     Line::from(vec![Span::styled(
         title,
-        Style::default().add_modifier(Modifier::BOLD),
+        accent_style().add_modifier(Modifier::BOLD),
     )])
 }
 
 fn compact_status_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
     Line::from(vec![
-        Span::styled(
-            format!("{label}: "),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::raw(value.into()),
+        Span::styled(format!("{label}: "), muted_style()),
+        Span::styled(value.into(), text_style()),
     ])
 }
 
 fn status_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
     Line::from(vec![
-        Span::styled(
-            format!("  {label:<18}"),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::raw(value.into()),
+        Span::styled(format!("  {label:<18}"), muted_style()),
+        Span::styled(value.into(), text_style()),
     ])
 }
 
 fn footer_title<'a>(
     mode: Mode,
-    message: &'a str,
+    _message: &'a str,
     search_query: &'a str,
     _input: &'a str,
 ) -> &'a str {
     match mode {
         Mode::Browse => {
-            if !message.is_empty() {
-                message
-            } else if !search_query.is_empty() {
+            if !search_query.is_empty() {
                 "Search"
             } else {
-                READY_MESSAGE
+                "Status"
             }
         }
         Mode::Add => "New task",
@@ -384,7 +430,7 @@ fn footer_title<'a>(
 }
 
 fn header_lines(app: &App, viewport: Viewport) -> Vec<Line<'static>> {
-    let title = Span::styled("LemonTodo", Style::default().add_modifier(Modifier::BOLD));
+    let title = Span::styled("LemonTodo", accent_style().add_modifier(Modifier::BOLD));
     let project = app.current_project_name().to_owned();
     let view = app.view_mode_name().to_owned();
     let filter = app.search_query().to_owned();
@@ -397,27 +443,24 @@ fn header_lines(app: &App, viewport: Viewport) -> Vec<Line<'static>> {
                     Span::raw("  "),
                     Span::styled(
                         truncate_to_width(&format!("project: {project}"), 18),
-                        Style::default().add_modifier(Modifier::BOLD),
+                        text_style().add_modifier(Modifier::BOLD),
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled(
-                        format!("view: {view}"),
-                        Style::default().add_modifier(Modifier::DIM),
-                    ),
+                    Span::styled(format!("view: {view}"), muted_style()),
                     Span::raw("  "),
                     Span::styled(
                         "a add  e edit  S sync  ? help",
-                        Style::default().add_modifier(Modifier::DIM),
+                        muted_style(),
                     ),
                 ]),
             ];
             if !filter.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::styled("filter: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled("filter: ", muted_style()),
                     Span::styled(
                         truncate_to_width(&filter, 24),
-                        Style::default().add_modifier(Modifier::ITALIC),
+                        accent_style().add_modifier(Modifier::ITALIC),
                     ),
                 ]));
             }
@@ -430,25 +473,25 @@ fn header_lines(app: &App, viewport: Viewport) -> Vec<Line<'static>> {
                     Span::raw("  "),
                     Span::styled(
                         truncate_to_width(&format!("project: {project}"), 30),
-                        Style::default().add_modifier(Modifier::BOLD),
+                        text_style().add_modifier(Modifier::BOLD),
                     ),
                     Span::raw("  "),
                     Span::styled(
                         format!("view: {view}"),
-                        Style::default().add_modifier(Modifier::BOLD),
+                        accent_style().add_modifier(Modifier::BOLD),
                     ),
                 ]),
                 Line::from(vec![Span::styled(
                     "j/k move  [ ] project  space toggle  a add  e edit  S sync  ? help",
-                    Style::default().add_modifier(Modifier::DIM),
+                    muted_style(),
                 )]),
             ];
             if !filter.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::styled("filter: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled("filter: ", muted_style()),
                     Span::styled(
                         truncate_to_width(&filter, 48),
-                        Style::default().add_modifier(Modifier::ITALIC),
+                        accent_style().add_modifier(Modifier::ITALIC),
                     ),
                 ]));
             }
@@ -470,15 +513,15 @@ fn header_lines(app: &App, viewport: Viewport) -> Vec<Line<'static>> {
                 Span::raw("  |  "),
                 Span::styled(
                     "j/k select  space toggle  a add  e edit  S sync  s status  ? help  q quit",
-                    Style::default().add_modifier(Modifier::DIM),
+                    muted_style(),
                 ),
             ])];
             if !filter.is_empty() {
                 lines.push(Line::from(vec![
-                    Span::styled("filter: ", Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled("filter: ", muted_style()),
                     Span::styled(
                         truncate_to_width(&filter, 72),
-                        Style::default().add_modifier(Modifier::ITALIC),
+                        accent_style().add_modifier(Modifier::ITALIC),
                     ),
                 ]));
             }
@@ -574,7 +617,7 @@ fn task_item_phone<'a>(
 ) -> ListItem<'a> {
     let marker = task_marker(task.status);
     let title_style = task_style(task.status);
-    let meta_style = Style::default().add_modifier(Modifier::DIM);
+    let meta_style = muted_style();
     let mut lines = vec![Line::from(vec![
         Span::styled(marker, title_style),
         Span::raw(" "),
@@ -637,7 +680,7 @@ fn task_item_tablet<'a>(
         )
     };
     let task_style = task_style(task.status);
-    let meta_style = Style::default().add_modifier(Modifier::DIM);
+    let meta_style = muted_style();
     let project = if show_project {
         format!(" @{project_name}")
     } else {
@@ -690,7 +733,7 @@ fn task_item_desktop<'a>(
     };
 
     let task_style = task_style(task.status);
-    let meta_style = Style::default().add_modifier(Modifier::DIM);
+    let meta_style = muted_style();
 
     let project = if show_project {
         format!(" [{project_name}]")
@@ -762,8 +805,8 @@ fn task_marker(status: TaskStatus) -> &'static str {
 
 fn task_style(status: TaskStatus) -> Style {
     match status {
-        TaskStatus::Open => Style::default(),
-        TaskStatus::Done | TaskStatus::Archived => Style::default().add_modifier(Modifier::DIM),
+        TaskStatus::Open => accent_style(),
+        TaskStatus::Done | TaskStatus::Archived => muted_style(),
     }
 }
 
@@ -812,7 +855,12 @@ fn draw_too_small(frame: &mut ratatui::Frame<'_>, area: Rect) {
             Line::from("Use at least 32x10"),
         ])
         .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL)),
+        .style(text_style().bg(COLOR_PANEL))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style()),
+        ),
         popup,
     );
 }
