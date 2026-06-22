@@ -115,11 +115,17 @@ LEMONTODO_SERVER_HOST=0.0.0.0
 LEMONTODO_SERVER_PORT=8787
 LEMONTODO_SERVER_DB=<platform-data-dir>/lemontodo-server/server.db
 LEMONTODO_ALLOW_REGISTRATION=false
+LEMONTODO_BILLING_ENABLED=false
+LEMONTODO_BILLING_PROVIDER=
+LEMONTODO_BILLING_MONTHLY_PRICE_CENTS=0
+LEMONTODO_BILLING_CURRENCY=USD
 LEMONTODO_SESSION_TTL_SECS=2592000
 LEMONTODO_ADMIN_EMAIL=
 LEMONTODO_ADMIN_PASSWORD=
 LEMONTODO_REGISTER_WASM_DIR=target/register-wasm
 ```
+
+When billing is disabled, every account is treated as `premium` and can create projects without limits. When `LEMONTODO_BILLING_ENABLED=true`, new non-admin accounts default to `free`; Free clients can only use Inbox, while Premium accounts can create projects. Supported billing provider values are `stripe`, `creem`, and `dodopayments`.
 
 Build the browser-side account WASM bundle before using `/register` or `/`:
 
@@ -238,7 +244,7 @@ TUI controls:
 - `Esc`: close help/sync status or cancel input mode
 - `q`: quit
 
-When a sync account is configured, opening the TUI prompts once for the master password to unlock auto-sync for the current session. Press Enter at that prompt to skip auto-sync. While unlocked, the TUI syncs on startup, after local edits with a short debounce, every 60 seconds while idle, and once before quit.
+When a sync account is configured, opening the TUI prompts once for the master password to unlock auto-sync for the current session. Press Enter at that prompt to skip auto-sync. If you enter a non-empty but incorrect master password, TUI startup fails instead of silently continuing with auto-sync disabled. While unlocked, the TUI syncs on startup, after local edits with a short debounce, every 60 seconds while idle, and once before quit.
 
 ## Data Location
 

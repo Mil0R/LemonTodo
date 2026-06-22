@@ -16,6 +16,7 @@ Do not expand the MVP into a general notes app, project-management suite, Notion
 - Cloudflare is not part of the first implementation.
 - Official hosted service may be added later and may charge for server resources.
 - Self-hosting must remain free.
+- Optional billing is disabled by default. When disabled, all accounts are Premium. When enabled, new non-admin accounts default to Free and only Premium accounts can create projects beyond Inbox.
 - Server-side storage is blind: clients encrypt before upload.
 - Server administrators must not be able to read user Todo content.
 - Account password is for server authentication.

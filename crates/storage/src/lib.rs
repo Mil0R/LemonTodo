@@ -1891,7 +1891,8 @@ fn row_to_remote_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteOp
 }
 
 fn is_inbox_bootstrap_operation(operation: &Operation) -> bool {
-    if operation.object_type != ObjectType::List || operation.operation_type != OperationType::Create
+    if operation.object_type != ObjectType::List
+        || operation.operation_type != OperationType::Create
     {
         return false;
     }
@@ -2147,10 +2148,16 @@ mod tests {
         assert_eq!(imported[0].note_markdown, "Snapshot note");
         let operations = target.pending_operations().unwrap();
         assert_eq!(operations.len(), 2);
-        assert!(operations.iter().any(|operation| is_inbox_bootstrap_operation(operation)));
-        assert!(operations.iter().any(|operation| {
-            operation.operation_type == OperationType::ImportSnapshot
-        }));
+        assert!(
+            operations
+                .iter()
+                .any(|operation| is_inbox_bootstrap_operation(operation))
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| { operation.operation_type == OperationType::ImportSnapshot })
+        );
     }
 
     #[test]

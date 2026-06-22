@@ -101,3 +101,7 @@ This is intentional:
 - Donations or sponsorships may support development.
 - Official hosted sync service may charge for server resources.
 - The product should not lock core functionality behind the official server.
+- Optional billing mode is controlled by server configuration and is disabled by default.
+- When billing is disabled, every account is treated as Premium and can create projects without limits.
+- When billing is enabled, new non-admin accounts default to Free; Free accounts can use Inbox but cannot create additional projects.
+- Subscription providers may include Stripe, Creem, and Dodopayments. A successful subscription upgrades the account to Premium.

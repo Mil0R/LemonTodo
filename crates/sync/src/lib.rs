@@ -128,6 +128,7 @@ pub enum RejectionReason {
     PayloadTooLarge,
     InvalidEnvelope,
     UnsupportedProtocol,
+    PlanLimit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,11 +193,36 @@ pub struct AccountStatusResponse {
     pub email: String,
     pub is_admin: bool,
     pub has_vault_key: bool,
+    pub plan: AccountPlan,
+    pub billing: BillingStatus,
     pub user_created_at: DateTime<Utc>,
     pub session_created_at: DateTime<Utc>,
     pub session_last_used_at: DateTime<Utc>,
     pub session_device_id: Option<Uuid>,
     pub session_device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountPlan {
+    Free,
+    Premium,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingProvider {
+    Stripe,
+    Creem,
+    Dodopayments,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BillingStatus {
+    pub enabled: bool,
+    pub provider: Option<BillingProvider>,
+    pub monthly_price_cents: u64,
+    pub currency: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,11 +443,25 @@ mod tests {
         let json = serde_json::to_value(&rejection).unwrap();
         assert_eq!(json["reason"], "duplicate");
 
+        let rejection = RejectedSyncObject {
+            operation_id: Uuid::nil(),
+            reason: RejectionReason::PlanLimit,
+        };
+        let json = serde_json::to_value(&rejection).unwrap();
+        assert_eq!(json["reason"], "plan_limit");
+
         let account = AccountStatusResponse {
             user_id: Uuid::nil(),
             email: "user@example.com".to_owned(),
             is_admin: false,
             has_vault_key: true,
+            plan: AccountPlan::Premium,
+            billing: BillingStatus {
+                enabled: false,
+                provider: None,
+                monthly_price_cents: 0,
+                currency: "USD".to_owned(),
+            },
             user_created_at: Utc::now(),
             session_created_at: Utc::now(),
             session_last_used_at: Utc::now(),
@@ -433,6 +473,7 @@ mod tests {
         assert_eq!(json["email"], "user@example.com");
         assert_eq!(json["is_admin"], false);
         assert_eq!(json["has_vault_key"], true);
+        assert_eq!(json["plan"], "premium");
         assert_eq!(json["session_device_id"], Uuid::nil().to_string());
         assert_eq!(json["session_device_name"], "workstation");
         assert!(json.get("session_last_used_at").is_some());

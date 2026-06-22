@@ -25,14 +25,20 @@ RUN apt-get update \
     && mkdir -p /data /opt/lemontodo/register-wasm /opt/lemontodo/web \
     && chown -R lemontodo:lemontodo /data /opt/lemontodo
 
-COPY --from=server-builder /src/target/release/ltd-server /usr/local/bin/ltd-server
-COPY --from=server-builder /out/register-wasm /opt/lemontodo/register-wasm
-COPY --from=web-builder /src/apps/web/dist /opt/lemontodo/web
+COPY --chown=lemontodo:lemontodo --from=server-builder /src/target/release/ltd-server /usr/local/bin/ltd-server
+COPY --chown=lemontodo:lemontodo --from=server-builder /out/register-wasm /opt/lemontodo/register-wasm
+COPY --chown=lemontodo:lemontodo --from=web-builder /src/apps/web/dist /opt/lemontodo/web
+RUN chmod 755 /usr/local/bin/ltd-server \
+    && chmod -R u+rwX,go+rX /opt/lemontodo/register-wasm /opt/lemontodo/web
 
 ENV LEMONTODO_SERVER_HOST=0.0.0.0 \
     LEMONTODO_SERVER_PORT=8787 \
     LEMONTODO_SERVER_DB=/data/lemontodo.db \
     LEMONTODO_ALLOW_REGISTRATION=false \
+    LEMONTODO_BILLING_ENABLED=false \
+    LEMONTODO_BILLING_PROVIDER= \
+    LEMONTODO_BILLING_MONTHLY_PRICE_CENTS=0 \
+    LEMONTODO_BILLING_CURRENCY=USD \
     LEMONTODO_REGISTER_WASM_DIR=/opt/lemontodo/register-wasm \
     LEMONTODO_WEB_STATIC_DIR=/opt/lemontodo/web \
     LEMONTODO_WEB_CLIENT_URL=/

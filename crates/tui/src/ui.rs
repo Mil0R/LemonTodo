@@ -81,7 +81,7 @@ pub fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
 
     if app.mode() != Mode::Browse {
-        let cursor_x = chunks[2].x + 1 + footer_input_offset(app.input());
+        let cursor_x = chunks[2].x + 1 + footer_input_offset(app.input(), app.input_cursor());
         let cursor_y = chunks[2].y + footer_input_row(viewport);
         frame.set_cursor_position((cursor_x, cursor_y));
     }
@@ -128,7 +128,10 @@ fn draw_tasks(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, viewport: V
     let list = List::new(items)
         .block(
             Block::default()
-                .title(Span::styled("Tasks", accent_style().add_modifier(Modifier::BOLD)))
+                .title(Span::styled(
+                    "Tasks",
+                    accent_style().add_modifier(Modifier::BOLD),
+                ))
                 .borders(Borders::ALL)
                 .border_style(border_style()),
         )
@@ -151,7 +154,10 @@ fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, lines: &[L
         .style(text_style().bg(COLOR_PANEL))
         .block(
             Block::default()
-                .title(Span::styled(title, accent_style().add_modifier(Modifier::BOLD)))
+                .title(Span::styled(
+                    title,
+                    accent_style().add_modifier(Modifier::BOLD),
+                ))
                 .borders(Borders::ALL)
                 .border_style(border_style()),
         )
@@ -267,7 +273,10 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, area: Rect, viewport: Viewport) {
         .style(text_style().bg(COLOR_PANEL))
         .block(
             Block::default()
-                .title(Span::styled("Help", accent_style().add_modifier(Modifier::BOLD)))
+                .title(Span::styled(
+                    "Help",
+                    accent_style().add_modifier(Modifier::BOLD),
+                ))
                 .borders(Borders::ALL)
                 .border_style(border_style()),
         )
@@ -449,10 +458,7 @@ fn header_lines(app: &App, viewport: Viewport) -> Vec<Line<'static>> {
                 Line::from(vec![
                     Span::styled(format!("view: {view}"), muted_style()),
                     Span::raw("  "),
-                    Span::styled(
-                        "a add  e edit  S sync  ? help",
-                        muted_style(),
-                    ),
+                    Span::styled("a add  e edit  S sync  ? help", muted_style()),
                 ]),
             ];
             if !filter.is_empty() {
@@ -590,8 +596,8 @@ fn footer_input_row(viewport: Viewport) -> u16 {
     }
 }
 
-fn footer_input_offset(input: &str) -> u16 {
-    let width = UnicodeWidthStr::width(input);
+fn footer_input_offset(input: &str, cursor: usize) -> u16 {
+    let width = UnicodeWidthStr::width(&input[..cursor]);
     width.min(u16::MAX as usize) as u16
 }
 

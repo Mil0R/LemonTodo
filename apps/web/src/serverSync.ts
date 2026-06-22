@@ -17,6 +17,13 @@ export interface AccountStatus {
   email: string;
   is_admin: boolean;
   has_vault_key: boolean;
+  plan: "free" | "premium";
+  billing: {
+    enabled: boolean;
+    provider: "stripe" | "creem" | "dodopayments" | null;
+    monthly_price_cents: number;
+    currency: string;
+  };
 }
 
 export interface LoginSession {

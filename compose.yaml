@@ -1,9 +1,7 @@
 services:
   lemontodo:
     image: ${LEMONTODO_IMAGE:-ghcr.io/mil0r/lemontodo:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    init: true
     restart: unless-stopped
     ports:
       - "${LEMONTODO_PORT:-8787}:8787"
@@ -12,6 +10,10 @@ services:
       LEMONTODO_SERVER_PORT: 8787
       LEMONTODO_SERVER_DB: /data/lemontodo.db
       LEMONTODO_ALLOW_REGISTRATION: ${LEMONTODO_ALLOW_REGISTRATION:-false}
+      LEMONTODO_BILLING_ENABLED: ${LEMONTODO_BILLING_ENABLED:-false}
+      LEMONTODO_BILLING_PROVIDER: ${LEMONTODO_BILLING_PROVIDER:-}
+      LEMONTODO_BILLING_MONTHLY_PRICE_CENTS: ${LEMONTODO_BILLING_MONTHLY_PRICE_CENTS:-0}
+      LEMONTODO_BILLING_CURRENCY: ${LEMONTODO_BILLING_CURRENCY:-USD}
       LEMONTODO_SESSION_TTL_SECS: ${LEMONTODO_SESSION_TTL_SECS:-2592000}
       LEMONTODO_ADMIN_EMAIL: ${LEMONTODO_ADMIN_EMAIL:-}
       LEMONTODO_ADMIN_PASSWORD: ${LEMONTODO_ADMIN_PASSWORD:-}
@@ -19,6 +21,16 @@ services:
       LEMONTODO_REGISTER_WASM_DIR: /opt/lemontodo/register-wasm
       LEMONTODO_WEB_STATIC_DIR: /opt/lemontodo/web
       LEMONTODO_WEB_CLIENT_URL: /
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -r /opt/lemontodo/web/index.html && test -r /opt/lemontodo/register-wasm/register_wasm.js && test -r /opt/lemontodo/register-wasm/register_wasm_bg.wasm",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - lemontodo-data:/data
 

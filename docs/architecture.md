@@ -243,7 +243,7 @@ Follow the Bitwarden-style separation:
 
 - Account password authenticates to the server.
 - Master password unlocks the encrypted vault key.
-- `GET /v1/account/me` returns only authenticated account/session metadata and whether the encrypted vault key exists on the server.
+- `GET /v1/account/me` returns only authenticated account/session metadata, account plan, billing configuration, and whether the encrypted vault key exists on the server.
 - Login also attaches per-session device metadata: a stable local device id and a best-effort device name.
 
 Registration flow:
@@ -319,6 +319,7 @@ Minimum server responsibilities:
 - session/token management
 - admin bootstrap
 - registration/invite policy
+- optional billing configuration and account plan metadata
 - encrypted vault metadata
 - encrypted object storage
 - change log and cursors
@@ -331,6 +332,8 @@ The server must not:
 - merge plaintext task fields
 - allow admins to read user content
 - reset a user's master password
+
+Billing and account plan metadata must not require plaintext Todo access. Clients read the authenticated account plan from `/v1/account/me` and enforce UI limits locally. With billing disabled, the effective account plan is Premium for every user. With billing enabled, new non-admin users start as Free and can only use Inbox until a subscription flow marks the account Premium.
 
 ## Server Configuration
 
@@ -345,6 +348,10 @@ LEMONTODO_DATABASE_URL=sqlite:///data/lemontodo.db
 LEMONTODO_STORAGE_DRIVER=local
 LEMONTODO_STORAGE_PATH=/data/blobs
 LEMONTODO_SESSION_TTL_SECS=2592000
+LEMONTODO_BILLING_ENABLED=false
+LEMONTODO_BILLING_PROVIDER=
+LEMONTODO_BILLING_MONTHLY_PRICE_CENTS=0
+LEMONTODO_BILLING_CURRENCY=USD
 
 LEMONTODO_SIGNUPS_ALLOWED=false
 LEMONTODO_INVITES_ALLOWED=true
@@ -355,6 +362,8 @@ LEMONTODO_JWT_SECRET_FILE=/run/secrets/jwt_secret
 ```
 
 Plain password environment variables may be supported for local development, but file-based secrets should be documented for production.
+
+Supported billing provider values are `stripe`, `creem`, and `dodopayments`. Provider credentials and checkout/webhook handlers are provider-specific server concerns; they must update server-side account plan metadata without exposing encrypted Todo content.
 
 Admin bootstrap behavior:
 

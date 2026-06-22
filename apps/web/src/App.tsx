@@ -302,6 +302,7 @@ function App() {
   const projects = state.projects;
   const selectedProject =
     projects.find((project) => project.id === state.currentProjectId) ?? projects[0] ?? null;
+  const isPremium = account?.plan === "premium";
   const visibleTasks = filterTasks(state.tasks, state.search, selectedProject?.id ?? null);
   const selectedTask =
     state.tasks.find((task) => task.id === state.selectedTaskId) ?? visibleTasks[0] ?? null;
@@ -325,6 +326,13 @@ function App() {
   }
 
   function handleProjectNew() {
+    if (!isPremium) {
+      dispatch({
+        type: "set_sync_message",
+        message: "Free accounts can only use Inbox",
+      });
+      return;
+    }
     setProjectRemovePending(false);
     dispatch({ type: "set_project_draft", value: "" });
     window.requestAnimationFrame(() => {
@@ -334,6 +342,13 @@ function App() {
   }
 
   function handleProjectCreate() {
+    if (!isPremium) {
+      dispatch({
+        type: "set_sync_message",
+        message: "Upgrade to Premium to create projects",
+      });
+      return;
+    }
     setProjectRemovePending(false);
     dispatch({ type: "new_project" });
   }
@@ -628,7 +643,12 @@ function App() {
               placeholder="Project name"
             />
             <div className="project-actions">
-              <button className="button button-ghost" onClick={handleProjectCreate}>
+              <button
+                className="button button-ghost"
+                onClick={handleProjectCreate}
+                disabled={!isPremium}
+                title={isPremium ? "Create project" : "Premium required"}
+              >
                 Create
               </button>
               <button className="button button-ghost" onClick={handleProjectRename}>

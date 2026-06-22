@@ -13,6 +13,7 @@ pub struct App {
     current_project: ProjectSelection,
     selected: usize,
     input: String,
+    input_cursor: usize,
     mode: Mode,
     view_mode: ViewMode,
     help_visible: bool,
@@ -66,6 +67,7 @@ impl App {
             current_project: ProjectSelection::All,
             selected: 0,
             input: String::new(),
+            input_cursor: 0,
             mode: Mode::Browse,
             view_mode: ViewMode::Compact,
             help_visible: false,
@@ -111,6 +113,10 @@ impl App {
 
     pub fn input(&self) -> &str {
         &self.input
+    }
+
+    pub fn input_cursor(&self) -> usize {
+        self.input_cursor
     }
 
     pub fn mode(&self) -> Mode {
@@ -270,7 +276,7 @@ impl App {
         self.hide_help();
         self.hide_sync_status();
         self.mode = Mode::Add;
-        self.input.clear();
+        self.clear_input();
         self.message = "Add task".to_owned();
     }
 
@@ -281,7 +287,7 @@ impl App {
             self.message = "No task selected".to_owned();
             return;
         };
-        self.input = task.title.clone();
+        self.set_input(task.title.clone());
         self.mode = Mode::EditTitle;
         self.message = "Edit title".to_owned();
     }
@@ -293,7 +299,7 @@ impl App {
             self.message = "No task selected".to_owned();
             return;
         };
-        self.input = task.note_markdown.clone();
+        self.set_input(task.note_markdown.clone());
         self.mode = Mode::EditNote;
         self.message = "Edit note".to_owned();
     }
@@ -305,10 +311,11 @@ impl App {
             self.message = "No task selected".to_owned();
             return;
         };
-        self.input = task
-            .due_date
-            .map(|date| date.to_string())
-            .unwrap_or_default();
+        self.set_input(
+            task.due_date
+                .map(|date| date.to_string())
+                .unwrap_or_default(),
+        );
         self.mode = Mode::EditDue;
         self.message = "Edit due date as YYYY-MM-DD, empty clears".to_owned();
     }
@@ -320,7 +327,7 @@ impl App {
             self.message = "No task selected".to_owned();
             return;
         };
-        self.input = task.tags.join(" ");
+        self.set_input(task.tags.join(" "));
         self.mode = Mode::EditTags;
         self.message = "Edit tags separated by spaces or commas".to_owned();
     }
@@ -332,7 +339,7 @@ impl App {
             self.message = "No task selected".to_owned();
             return;
         };
-        self.input = self.project_name_for_task(task).to_owned();
+        self.set_input(self.project_name_for_task(task).to_owned());
         self.mode = Mode::MoveProject;
         self.message = "Move task to project".to_owned();
     }
@@ -340,14 +347,14 @@ impl App {
     pub fn start_search(&mut self) {
         self.hide_help();
         self.hide_sync_status();
-        self.input = self.search_query.clone();
+        self.set_input(self.search_query.clone());
         self.mode = Mode::Search;
         self.message = "Search tasks".to_owned();
     }
 
     pub fn cancel_input(&mut self) {
         self.mode = Mode::Browse;
-        self.input.clear();
+        self.clear_input();
         self.message = "Cancelled".to_owned();
     }
 
@@ -358,11 +365,41 @@ impl App {
     }
 
     pub fn push_input(&mut self, value: char) {
-        self.input.push(value);
+        self.input.insert(self.input_cursor, value);
+        self.input_cursor += value.len_utf8();
     }
 
     pub fn pop_input(&mut self) {
-        self.input.pop();
+        if self.input_cursor == 0 {
+            return;
+        }
+        let previous = previous_char_boundary(&self.input, self.input_cursor);
+        self.input.drain(previous..self.input_cursor);
+        self.input_cursor = previous;
+    }
+
+    pub fn delete_input(&mut self) {
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let next = next_char_boundary(&self.input, self.input_cursor);
+        self.input.drain(self.input_cursor..next);
+    }
+
+    pub fn move_input_left(&mut self) {
+        self.input_cursor = previous_char_boundary(&self.input, self.input_cursor);
+    }
+
+    pub fn move_input_right(&mut self) {
+        self.input_cursor = next_char_boundary(&self.input, self.input_cursor);
+    }
+
+    pub fn move_input_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    pub fn move_input_end(&mut self) {
+        self.input_cursor = self.input.len();
     }
 
     pub fn submit_input(&mut self) -> Result<()> {
@@ -420,7 +457,7 @@ impl App {
             .store
             .add_task_to_project(NewTask::new(title), project_name.as_deref())?;
         self.message = format!("Added {}", task.title);
-        self.input.clear();
+        self.clear_input();
         self.mode = Mode::Browse;
         self.refresh()?;
         self.select_task(task.id);
@@ -431,13 +468,13 @@ impl App {
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             self.mode = Mode::Browse;
-            self.input.clear();
+            self.clear_input();
             return Ok(());
         };
 
         let updated = self.store.update_task_title_by_id(task.id, &self.input)?;
         self.message = format!("Updated {}", updated.title);
-        self.input.clear();
+        self.clear_input();
         self.mode = Mode::Browse;
         self.refresh()?;
         self.select_task(updated.id);
@@ -448,13 +485,13 @@ impl App {
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             self.mode = Mode::Browse;
-            self.input.clear();
+            self.clear_input();
             return Ok(());
         };
 
         let updated = self.store.update_task_note_by_id(task.id, &self.input)?;
         self.message = format!("Updated note for {}", updated.title);
-        self.input.clear();
+        self.clear_input();
         self.mode = Mode::Browse;
         self.refresh()?;
         self.select_task(updated.id);
@@ -465,7 +502,7 @@ impl App {
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             self.mode = Mode::Browse;
-            self.input.clear();
+            self.clear_input();
             return Ok(());
         };
 
@@ -475,7 +512,7 @@ impl App {
             Some(date) => format!("Updated due date for {} to {date}", updated.title),
             None => format!("Cleared due date for {}", updated.title),
         };
-        self.input.clear();
+        self.clear_input();
         self.mode = Mode::Browse;
         self.refresh()?;
         self.select_task(updated.id);
@@ -486,7 +523,7 @@ impl App {
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
             self.mode = Mode::Browse;
-            self.input.clear();
+            self.clear_input();
             return Ok(());
         };
 
@@ -497,7 +534,7 @@ impl App {
         } else {
             format!("Updated tags for {}", updated.title)
         };
-        self.input.clear();
+        self.clear_input();
         self.mode = Mode::Browse;
         self.refresh()?;
         self.select_task(updated.id);
@@ -507,7 +544,7 @@ impl App {
     fn submit_move_project(&mut self) -> Result<()> {
         let Some(task) = self.selected_task() else {
             self.message = "No task selected".to_owned();
-            self.input.clear();
+            self.clear_input();
             self.mode = Mode::Browse;
             return Ok(());
         };
@@ -532,7 +569,7 @@ impl App {
 
         let moved = self.store.move_task_to_project_by_id(task_id, project.id)?;
         self.message = format!("Moved {task_title} to {}", project.name);
-        self.input.clear();
+        self.clear_input();
         self.mode = Mode::Browse;
         self.refresh()?;
         self.select_task(moved.id);
@@ -541,7 +578,7 @@ impl App {
 
     fn submit_search(&mut self) -> Result<()> {
         self.search_query = self.input.trim().to_owned();
-        self.input.clear();
+        self.clear_input();
         self.mode = Mode::Browse;
         self.message = if self.search_query.is_empty() {
             "Search cleared".to_owned()
@@ -606,6 +643,32 @@ impl App {
             pending_remote_operations: self.store.pending_remote_operation_count()?,
         })
     }
+
+    fn set_input(&mut self, input: String) {
+        self.input = input;
+        self.input_cursor = self.input.len();
+    }
+
+    fn clear_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+    }
+}
+
+fn previous_char_boundary(input: &str, cursor: usize) -> usize {
+    input[..cursor]
+        .char_indices()
+        .last()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(input: &str, cursor: usize) -> usize {
+    input[cursor..]
+        .char_indices()
+        .nth(1)
+        .map(|(index, _)| cursor + index)
+        .unwrap_or(input.len())
 }
 
 pub fn parse_due_input(input: &str) -> Result<Option<NaiveDate>> {
@@ -626,4 +689,41 @@ pub fn parse_tags_input(input: &str) -> Vec<String> {
         .filter(|tag| !tag.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TodoStore::open(dir.path().join("tui.db")).unwrap();
+        App::new(store).unwrap()
+    }
+
+    #[test]
+    fn edits_input_at_cursor_with_unicode_boundaries() {
+        let mut app = test_app();
+        app.start_add();
+        app.push_input('A');
+        app.push_input('中');
+        app.push_input('B');
+
+        app.move_input_left();
+        app.push_input('x');
+
+        assert_eq!(app.input(), "A中xB");
+        assert_eq!(app.input_cursor(), "A中x".len());
+
+        app.move_input_left();
+        app.pop_input();
+
+        assert_eq!(app.input(), "AxB");
+        assert_eq!(app.input_cursor(), "A".len());
+
+        app.delete_input();
+
+        assert_eq!(app.input(), "AB");
+        assert_eq!(app.input_cursor(), "A".len());
+    }
 }

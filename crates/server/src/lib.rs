@@ -20,9 +20,10 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use lemontodo_sync::{
-    AcceptedSyncObject, AccountStatusResponse, EncryptedSyncObject, LoginRequest, LoginResponse,
-    LogoutRequest, LogoutResponse, PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest,
-    PushResponse, PutVaultMetadataRequest, RegisterRequest, RegisterResponse, RejectedSyncObject,
+    AcceptedSyncObject, AccountPlan, AccountStatusResponse, BillingProvider, BillingStatus,
+    EncryptedSyncObject, LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
+    PROTOCOL_VERSION, PullRequest, PullResponse, PushRequest, PushResponse,
+    PutVaultMetadataRequest, RegisterRequest, RegisterResponse, RejectedSyncObject,
     RejectionReason, RevokeSessionRequest, RevokeSessionResponse, ServerAuthInfo, ServerCapability,
     ServerInfo, SessionInfo, SessionsResponse, VaultMetadataResponse,
 };
@@ -500,12 +501,32 @@ pub struct ServerConfig {
     pub port: u16,
     pub database_path: PathBuf,
     pub allow_registration: bool,
+    pub billing: BillingConfig,
     pub session_ttl_secs: i64,
     pub admin_email: Option<String>,
     pub admin_password: Option<String>,
     pub register_wasm_dir: PathBuf,
     pub web_static_dir: PathBuf,
     pub web_client_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BillingConfig {
+    pub enabled: bool,
+    pub provider: Option<BillingProvider>,
+    pub monthly_price_cents: u64,
+    pub currency: String,
+}
+
+impl BillingConfig {
+    fn status(&self) -> BillingStatus {
+        BillingStatus {
+            enabled: self.enabled,
+            provider: self.provider,
+            monthly_price_cents: self.monthly_price_cents,
+            currency: self.currency.clone(),
+        }
+    }
 }
 
 impl ServerConfig {
@@ -530,6 +551,36 @@ impl ServerConfig {
             .map(|value| parse_bool(&value, "LEMONTODO_ALLOW_REGISTRATION"))
             .transpose()?
             .unwrap_or(false);
+        let billing_enabled = lookup("LEMONTODO_BILLING_ENABLED")
+            .map(|value| parse_bool(&value, "LEMONTODO_BILLING_ENABLED"))
+            .transpose()?
+            .unwrap_or(false);
+        let billing_provider = lookup("LEMONTODO_BILLING_PROVIDER")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .map(|value| parse_billing_provider(&value))
+            .transpose()?;
+        if billing_enabled && billing_provider.is_none() {
+            anyhow::bail!("LEMONTODO_BILLING_PROVIDER is required when billing is enabled");
+        }
+        let billing_monthly_price_cents = lookup("LEMONTODO_BILLING_MONTHLY_PRICE_CENTS")
+            .map(|value| {
+                value.parse::<u64>().with_context(|| {
+                    format!("invalid LEMONTODO_BILLING_MONTHLY_PRICE_CENTS: {value}")
+                })
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let billing_currency = lookup("LEMONTODO_BILLING_CURRENCY")
+            .map(|value| value.trim().to_uppercase())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "USD".to_owned());
+        let billing = BillingConfig {
+            enabled: billing_enabled,
+            provider: billing_provider,
+            monthly_price_cents: billing_monthly_price_cents,
+            currency: billing_currency,
+        };
         let session_ttl_secs = lookup("LEMONTODO_SESSION_TTL_SECS")
             .map(|value| {
                 value
@@ -565,6 +616,7 @@ impl ServerConfig {
             port,
             database_path,
             allow_registration,
+            billing,
             session_ttl_secs,
             admin_email,
             admin_password,
@@ -611,6 +663,7 @@ pub struct UserAccount {
     pub email: String,
     pub password_hash: String,
     pub is_admin: bool,
+    pub plan: AccountPlan,
     pub encrypted_vault_key_json: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -658,7 +711,8 @@ impl ServerStore {
         if self.find_user_by_email(email)?.is_some() {
             return Ok(None);
         }
-        self.create_user(email, password, true).map(Some)
+        self.create_user(email, password, true, AccountPlan::Premium)
+            .map(Some)
     }
 
     pub fn create_user(
@@ -666,6 +720,7 @@ impl ServerStore {
         email: &str,
         password: &str,
         is_admin: bool,
+        plan: AccountPlan,
     ) -> Result<UserAccount> {
         let email = normalize_email(email)?;
         let password = password.trim();
@@ -681,17 +736,19 @@ impl ServerStore {
             email,
             password_hash: hash_password(password)?,
             is_admin,
+            plan,
             encrypted_vault_key_json: None,
             created_at: Utc::now(),
         };
         self.conn.execute(
-            "INSERT INTO users (id, email, password_hash, is_admin, encrypted_vault_key_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO users (id, email, password_hash, is_admin, account_plan, encrypted_vault_key_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 user.id.to_string(),
                 user.email,
                 user.password_hash,
                 user.is_admin,
+                account_plan_as_str(user.plan),
                 user.encrypted_vault_key_json,
                 user.created_at.to_rfc3339(),
             ],
@@ -705,6 +762,7 @@ impl ServerStore {
         auth_hash: &str,
         encrypted_vault_key_json: &str,
         is_admin: bool,
+        plan: AccountPlan,
     ) -> Result<UserAccount> {
         let email = normalize_email(email)?;
         let auth_hash = auth_hash.trim();
@@ -723,17 +781,19 @@ impl ServerStore {
             email,
             password_hash: hash_password(auth_hash)?,
             is_admin,
+            plan,
             encrypted_vault_key_json: Some(encrypted_vault_key_json.to_owned()),
             created_at: Utc::now(),
         };
         self.conn.execute(
-            "INSERT INTO users (id, email, password_hash, is_admin, encrypted_vault_key_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO users (id, email, password_hash, is_admin, account_plan, encrypted_vault_key_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 user.id.to_string(),
                 user.email,
                 user.password_hash,
                 user.is_admin,
+                account_plan_as_str(user.plan),
                 user.encrypted_vault_key_json,
                 user.created_at.to_rfc3339(),
             ],
@@ -923,6 +983,15 @@ impl ServerStore {
     }
 
     pub fn push(&mut self, user_id: Uuid, request: PushRequest) -> Result<PushResponse> {
+        self.push_with_plan(user_id, request, AccountPlan::Premium)
+    }
+
+    pub fn push_with_plan(
+        &mut self,
+        user_id: Uuid,
+        request: PushRequest,
+        plan: AccountPlan,
+    ) -> Result<PushResponse> {
         if request.protocol_version != PROTOCOL_VERSION {
             return Ok(PushResponse {
                 protocol_version: PROTOCOL_VERSION,
@@ -942,6 +1011,11 @@ impl ServerStore {
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
         let tx = self.conn.transaction()?;
+        let mut free_list_create_count = if plan == AccountPlan::Free {
+            count_created_lists(&tx, user_id)?
+        } else {
+            0
+        };
         for object in request.objects {
             if has_operation(&tx, user_id, object.operation_id)? {
                 rejected.push(RejectedSyncObject {
@@ -949,6 +1023,17 @@ impl ServerStore {
                     reason: RejectionReason::Duplicate,
                 });
                 continue;
+            }
+
+            if plan == AccountPlan::Free && is_list_create(&object) {
+                if free_list_create_count >= 1 {
+                    rejected.push(RejectedSyncObject {
+                        operation_id: object.operation_id,
+                        reason: RejectionReason::PlanLimit,
+                    });
+                    continue;
+                }
+                free_list_create_count += 1;
             }
 
             insert_sync_object(&tx, user_id, &object)?;
@@ -1051,6 +1136,7 @@ impl ServerStore {
                 email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                account_plan TEXT NOT NULL DEFAULT 'premium',
                 encrypted_vault_key_json TEXT,
                 created_at TEXT NOT NULL
             );
@@ -1097,6 +1183,12 @@ impl ServerStore {
             "user_id",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        add_column_if_missing(
+            &self.conn,
+            "users",
+            "account_plan",
+            "TEXT NOT NULL DEFAULT 'premium'",
+        )?;
         add_column_if_missing(&self.conn, "users", "encrypted_vault_key_json", "TEXT")?;
         add_column_if_missing(&self.conn, "user_sessions", "device_id", "TEXT")?;
         add_column_if_missing(&self.conn, "user_sessions", "device_name", "TEXT")?;
@@ -1106,7 +1198,7 @@ impl ServerStore {
     fn find_user_by_id(&self, id: Uuid) -> Result<Option<UserAccount>> {
         self.conn
             .query_row(
-                "SELECT id, email, password_hash, is_admin, encrypted_vault_key_json, created_at
+                "SELECT id, email, password_hash, is_admin, account_plan, encrypted_vault_key_json, created_at
                  FROM users WHERE id = ?1",
                 params![id.to_string()],
                 row_to_user_account,
@@ -1119,7 +1211,7 @@ impl ServerStore {
         let email = normalize_email(email)?;
         self.conn
             .query_row(
-                "SELECT id, email, password_hash, is_admin, encrypted_vault_key_json, created_at
+                "SELECT id, email, password_hash, is_admin, account_plan, encrypted_vault_key_json, created_at
                  FROM users WHERE email = ?1",
                 params![email],
                 row_to_user_account,
@@ -1598,6 +1690,7 @@ async fn account_register(
             &request.auth_hash,
             &encrypted_vault_key_json,
             false,
+            default_account_plan(&state.config, false),
         )
         .map_err(|error| {
             let message = error.to_string();
@@ -1677,11 +1770,14 @@ async fn account_me(
     let (user, session) = store
         .authenticate_with_session(access_token, session_ttl(&state.config))
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
+    let plan = effective_account_plan(&state.config, &user);
     Ok(Json(AccountStatusResponse {
         user_id: user.id,
         email: user.email,
         is_admin: user.is_admin,
         has_vault_key: user.encrypted_vault_key_json.is_some(),
+        plan,
+        billing: state.config.billing.status(),
         user_created_at: user.created_at,
         session_created_at: session.created_at,
         session_last_used_at: session.last_used_at,
@@ -1822,8 +1918,9 @@ async fn sync_push(
     let (user, _) = store
         .authenticate_with_session(&request.access_token, session_ttl(&state.config))
         .map_err(|error| (StatusCode::UNAUTHORIZED, error.to_string()))?;
+    let plan = effective_account_plan(&state.config, &user);
     store
-        .push(user.id, request)
+        .push_with_plan(user.id, request, plan)
         .map(Json)
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
 }
@@ -1852,6 +1949,49 @@ fn parse_bool(value: &str, name: &str) -> Result<bool> {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
         _ => anyhow::bail!("{name} must be one of true/false, 1/0, yes/no, on/off"),
+    }
+}
+
+fn parse_billing_provider(value: &str) -> Result<BillingProvider> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stripe" => Ok(BillingProvider::Stripe),
+        "creem" => Ok(BillingProvider::Creem),
+        "dodopayments" | "dodo" | "dodo_payments" => Ok(BillingProvider::Dodopayments),
+        _ => anyhow::bail!("LEMONTODO_BILLING_PROVIDER must be stripe, creem, or dodopayments"),
+    }
+}
+
+fn default_account_plan(config: &ServerConfig, is_admin: bool) -> AccountPlan {
+    if is_admin || !config.billing.enabled {
+        AccountPlan::Premium
+    } else {
+        AccountPlan::Free
+    }
+}
+
+fn effective_account_plan(config: &ServerConfig, user: &UserAccount) -> AccountPlan {
+    if user.is_admin || !config.billing.enabled {
+        AccountPlan::Premium
+    } else {
+        user.plan
+    }
+}
+
+fn account_plan_as_str(plan: AccountPlan) -> &'static str {
+    match plan {
+        AccountPlan::Free => "free",
+        AccountPlan::Premium => "premium",
+    }
+}
+
+fn parse_account_plan(value: String) -> rusqlite::Result<AccountPlan> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "free" => Ok(AccountPlan::Free),
+        "premium" => Ok(AccountPlan::Premium),
+        _ => Err(to_sql_error(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid account plan stored in database",
+        ))),
     }
 }
 
@@ -1890,6 +2030,21 @@ fn has_operation(conn: &Connection, user_id: Uuid, operation_id: Uuid) -> Result
     .optional()
     .map(|value| value.is_some())
     .context("failed to check duplicate sync object")
+}
+
+fn is_list_create(object: &EncryptedSyncObject) -> bool {
+    object.object_type == "list" && object.operation_type == "create"
+}
+
+fn count_created_lists(conn: &Connection, user_id: Uuid) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(DISTINCT object_id)
+         FROM sync_objects
+         WHERE user_id = ?1 AND object_type = 'list' AND operation_type = 'create'",
+        params![user_id.to_string()],
+        |row| row.get::<_, i64>(0),
+    )
+    .context("failed to count created lists")
 }
 
 fn insert_sync_object(
@@ -2026,8 +2181,9 @@ fn row_to_user_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserAccount>
         email: row.get(1)?,
         password_hash: row.get(2)?,
         is_admin: row.get(3)?,
-        encrypted_vault_key_json: row.get(4)?,
-        created_at: parse_datetime(row.get::<_, String>(5)?)?,
+        plan: parse_account_plan(row.get::<_, String>(4)?)?,
+        encrypted_vault_key_json: row.get(5)?,
+        created_at: parse_datetime(row.get::<_, String>(6)?)?,
     })
 }
 
@@ -2077,6 +2233,15 @@ mod tests {
         assert_eq!(config.port, DEFAULT_PORT);
         assert_eq!(config.database_path, default_database_path());
         assert!(!config.allow_registration);
+        assert_eq!(
+            config.billing,
+            BillingConfig {
+                enabled: false,
+                provider: None,
+                monthly_price_cents: 0,
+                currency: "USD".to_owned(),
+            }
+        );
         assert_eq!(config.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
         assert_eq!(config.admin_email, None);
         assert_eq!(config.admin_password, None);
@@ -2091,6 +2256,10 @@ mod tests {
             ("LEMONTODO_SERVER_PORT", "9000"),
             ("LEMONTODO_SERVER_DB", "/tmp/lemontodo-test.db"),
             ("LEMONTODO_ALLOW_REGISTRATION", "yes"),
+            ("LEMONTODO_BILLING_ENABLED", "true"),
+            ("LEMONTODO_BILLING_PROVIDER", "stripe"),
+            ("LEMONTODO_BILLING_MONTHLY_PRICE_CENTS", "1200"),
+            ("LEMONTODO_BILLING_CURRENCY", "eur"),
             ("LEMONTODO_SESSION_TTL_SECS", "3600"),
             ("LEMONTODO_ADMIN_EMAIL", "admin@example.com"),
             ("LEMONTODO_ADMIN_PASSWORD", "dev-password"),
@@ -2107,6 +2276,15 @@ mod tests {
             PathBuf::from("/tmp/lemontodo-test.db")
         );
         assert!(config.allow_registration);
+        assert_eq!(
+            config.billing,
+            BillingConfig {
+                enabled: true,
+                provider: Some(BillingProvider::Stripe),
+                monthly_price_cents: 1200,
+                currency: "EUR".to_owned(),
+            }
+        );
         assert_eq!(config.session_ttl_secs, 3600);
         assert_eq!(config.admin_email, Some("admin@example.com".to_owned()));
         assert_eq!(config.admin_password, Some("dev-password".to_owned()));
@@ -2140,6 +2318,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("LEMONTODO_ALLOW_REGISTRATION"));
+    }
+
+    #[test]
+    fn ignores_empty_billing_provider_when_billing_is_disabled() {
+        let env = HashMap::from([
+            ("LEMONTODO_BILLING_ENABLED", "false"),
+            ("LEMONTODO_BILLING_PROVIDER", ""),
+        ]);
+        let config =
+            ServerConfig::from_lookup(|key| env.get(key).map(ToString::to_string)).unwrap();
+
+        assert_eq!(config.billing.provider, None);
+    }
+
+    #[test]
+    fn rejects_missing_billing_provider_when_billing_is_enabled() {
+        let env = HashMap::from([
+            ("LEMONTODO_BILLING_ENABLED", "true"),
+            ("LEMONTODO_BILLING_PROVIDER", ""),
+        ]);
+        let error = ServerConfig::from_lookup(|key| env.get(key).map(ToString::to_string))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("LEMONTODO_BILLING_PROVIDER is required"));
     }
 
     #[test]
@@ -2253,6 +2456,40 @@ mod tests {
         assert!(!response.is_admin);
         let store = state.store.lock().unwrap();
         assert_eq!(store.count_users().unwrap(), 1);
+        let user = store
+            .find_user_by_email("user@example.com")
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.plan, AccountPlan::Premium);
+    }
+
+    #[tokio::test]
+    async fn register_handler_creates_free_user_when_billing_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_server_config(dir.path().join("server.db"));
+        config.allow_registration = true;
+        config.billing = BillingConfig {
+            enabled: true,
+            provider: Some(BillingProvider::Creem),
+            monthly_price_cents: 900,
+            currency: "USD".to_owned(),
+        };
+        let state = AppState::open(config).unwrap();
+
+        let Json(response) = account_register(
+            State(state.clone()),
+            Json(register_request("user@example.com")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.email, "user@example.com");
+        let store = state.store.lock().unwrap();
+        let user = store
+            .find_user_by_email("user@example.com")
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.plan, AccountPlan::Free);
     }
 
     #[tokio::test]
@@ -2457,6 +2694,16 @@ mod tests {
         assert_eq!(status.email, "user@example.com");
         assert!(!status.is_admin);
         assert!(status.has_vault_key);
+        assert_eq!(status.plan, AccountPlan::Premium);
+        assert_eq!(
+            status.billing,
+            BillingStatus {
+                enabled: false,
+                provider: None,
+                monthly_price_cents: 0,
+                currency: "USD".to_owned(),
+            }
+        );
         assert_eq!(status.session_device_id, Some(device_id));
         assert_eq!(status.session_device_name.as_deref(), Some("workstation"));
         assert_eq!(status.session_created_at, initial_session.created_at);
@@ -2782,6 +3029,34 @@ mod tests {
     }
 
     #[test]
+    fn free_plan_rejects_second_list_create_without_reading_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
+        let (user, _session) = create_test_user_and_session(&mut store);
+        let first = test_list_create_object();
+        let second = test_list_create_object();
+
+        let response = store
+            .push_with_plan(
+                user.id,
+                PushRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    device_id: first.device_id,
+                    access_token: "unused".to_owned(),
+                    base_cursor: None,
+                    objects: vec![first, second],
+                },
+                AccountPlan::Free,
+            )
+            .unwrap();
+
+        assert_eq!(response.accepted.len(), 1);
+        assert_eq!(response.rejected.len(), 1);
+        assert_eq!(response.rejected[0].reason, RejectionReason::PlanLimit);
+        assert_eq!(store.count_sync_objects().unwrap(), 1);
+    }
+
+    #[test]
     fn rejects_unsupported_push_protocol_without_storing() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = ServerStore::open(dir.path().join("server.db")).unwrap();
@@ -2977,12 +3252,26 @@ mod tests {
         }
     }
 
+    fn test_list_create_object() -> EncryptedSyncObject {
+        EncryptedSyncObject {
+            object_type: "list".to_owned(),
+            operation_type: "create".to_owned(),
+            ..test_sync_object()
+        }
+    }
+
     fn test_server_config(database_path: PathBuf) -> ServerConfig {
         ServerConfig {
             host: DEFAULT_HOST.to_owned(),
             port: DEFAULT_PORT,
             database_path,
             allow_registration: false,
+            billing: BillingConfig {
+                enabled: false,
+                provider: None,
+                monthly_price_cents: 0,
+                currency: "USD".to_owned(),
+            },
             session_ttl_secs: DEFAULT_SESSION_TTL_SECS,
             admin_email: None,
             admin_password: None,
@@ -3000,7 +3289,9 @@ mod tests {
         store: &mut ServerStore,
         email: &str,
     ) -> (UserAccount, UserSession) {
-        let user = store.create_user(email, "dev-password", false).unwrap();
+        let user = store
+            .create_user(email, "dev-password", false, AccountPlan::Premium)
+            .unwrap();
         let session = store
             .create_session(&user, Some(Uuid::new_v4()), Some("test-device"))
             .unwrap();

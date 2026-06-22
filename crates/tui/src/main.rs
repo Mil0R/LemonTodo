@@ -441,6 +441,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Project { command }) => match command {
             ProjectCommand::Add { name } => {
+                ensure_remote_project_creation_allowed(&store)?;
                 let project = store.create_project(&name)?;
                 println!(
                     "Project {} {}",
@@ -1510,6 +1511,15 @@ fn print_remote_account_status(status: &AccountStatusResponse) {
     println!("Remote user id {}", status.user_id);
     println!("Remote admin {}", status.is_admin);
     println!("Remote vault key {}", status.has_vault_key);
+    println!("Remote plan {:?}", status.plan);
+    println!("Remote billing enabled {}", status.billing.enabled);
+    if let Some(provider) = status.billing.provider {
+        println!("Remote billing provider {:?}", provider);
+    }
+    println!(
+        "Remote monthly price {} {}",
+        status.billing.monthly_price_cents, status.billing.currency
+    );
     println!(
         "Remote user created {}",
         status.user_created_at.to_rfc3339()
@@ -1536,6 +1546,18 @@ fn print_remote_account_status(status: &AccountStatusResponse) {
             .clone()
             .unwrap_or_else(|| "<unknown>".to_owned())
     );
+}
+
+fn ensure_remote_project_creation_allowed(store: &TodoStore) -> Result<()> {
+    if store.sync_server_url()?.is_none() || store.sync_access_token()?.is_none() {
+        return Ok(());
+    }
+    let status = fetch_account_status(store, None)
+        .context("failed to verify account plan before creating project")?;
+    if status.billing.enabled && status.plan == lemontodo_sync::AccountPlan::Free {
+        anyhow::bail!("Free accounts can only use Inbox; upgrade to Premium to create projects");
+    }
+    Ok(())
 }
 
 fn print_sessions(response: &SessionsResponse) {
@@ -1826,9 +1848,8 @@ fn unlock_tui_auto_sync(store: &TodoStore) -> Result<Option<VaultKey>> {
             cache_tui_vault_key(store, &vault_key)?;
             Ok(Some(vault_key))
         }
-        Err(error) => {
-            println!("TUI auto-sync disabled: {error}");
-            Ok(None)
+        Err(_) => {
+            anyhow::bail!("wrong master password for TUI auto-sync; press Enter to skip auto-sync")
         }
     }
 }
@@ -2247,6 +2268,11 @@ fn handle_key(key: KeyEvent, app: &mut App) -> Result<KeyOutcome> {
                 }
             }
             KeyCode::Backspace => app.pop_input(),
+            KeyCode::Delete => app.delete_input(),
+            KeyCode::Left => app.move_input_left(),
+            KeyCode::Right => app.move_input_right(),
+            KeyCode::Home => app.move_input_home(),
+            KeyCode::End => app.move_input_end(),
             KeyCode::Char(value) => app.push_input(value),
             _ => {}
         },
