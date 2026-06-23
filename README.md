@@ -2,7 +2,7 @@
 
 LemonTodo is a developer-first, local-first, end-to-end encrypted Todo application.
 
-The first product surface is a terminal TUI. A React Native mobile app is planned later, but the business logic, sync protocol, encryption envelope, and conflict model should live in a shared core.
+The first product surface is a terminal TUI. The Web client is the second product surface. The planned mobile client should use React Native with Expo while keeping the business logic, sync protocol, encryption envelope, and conflict model aligned with the shared core.
 
 ## Product Direction
 
@@ -18,6 +18,8 @@ The first product surface is a terminal TUI. A React Native mobile app is planne
 
 - [Product MVP](docs/product-mvp.md)
 - [Architecture](docs/architecture.md)
+- [Mobile App Plan](docs/mobile-app-plan.md)
+- [Mobile Build and Release](docs/mobile-build-release.md)
 - [Licensing](docs/licensing.md)
 - [Agent Guide](AGENTS.md)
 - [License Notice](LICENSE.txt)
@@ -67,6 +69,18 @@ Run the server skeleton:
 
 ```bash
 LEMONTODO_SERVER_HOST=0.0.0.0 LEMONTODO_SERVER_PORT=8787 cargo run -p lemontodo-server
+```
+
+Or through npm scripts:
+
+```bash
+npm run server:dev
+```
+
+For local Web/Mobile development with registration enabled and Expo Web CORS:
+
+```bash
+npm run server:dev:local
 ```
 
 Run the local end-to-end client/server test:
@@ -123,6 +137,7 @@ LEMONTODO_SESSION_TTL_SECS=2592000
 LEMONTODO_ADMIN_EMAIL=
 LEMONTODO_ADMIN_PASSWORD=
 LEMONTODO_REGISTER_WASM_DIR=target/register-wasm
+LEMONTODO_CORS_ALLOW_ORIGIN=
 ```
 
 When billing is disabled, every account is treated as `premium` and can create projects without limits. When `LEMONTODO_BILLING_ENABLED=true`, new non-admin accounts default to `free`; Free clients can only use Inbox, while Premium accounts can create projects. Supported billing provider values are `stripe`, `creem`, and `dodopayments`.
@@ -136,6 +151,38 @@ LEMONTODO_ALLOW_REGISTRATION=true cargo run -p lemontodo-server
 ```
 
 If `rustup` is available, the script installs the `wasm32-unknown-unknown` target automatically. Otherwise install that target through your Rust toolchain manager first. The registration page derives the server auth hash and encrypted vault metadata in the browser before calling `/v1/account/register`; the login page derives the server auth hash in the browser before calling `/v1/account/login`. The master password is not posted to the server.
+
+## Mobile Development
+
+The React Native and Expo mobile client lives in `apps/mobile`.
+
+Install the Android development build when native dependencies change:
+
+```bash
+npm --prefix apps/mobile run android
+```
+
+Start Metro for ordinary TypeScript/UI development:
+
+```bash
+npm run mobile:start
+```
+
+Run type checking:
+
+```bash
+npm run mobile:typecheck
+```
+
+The mobile client supports server discovery, native Argon2 registration/login, encrypted vault unlock, project/task workflows, local persistence, and encrypted object sync. Real authentication requires the LemonTodo development build; Expo Go is limited to UI-only work.
+
+See [Mobile Build and Release](docs/mobile-build-release.md) for the full testing, APK distribution, and Google Play workflow.
+
+When testing the mobile client through Expo Web against a separate local server origin, set:
+
+```bash
+LEMONTODO_CORS_ALLOW_ORIGIN=http://localhost:8082
+```
 
 ## Install Locally
 
@@ -180,6 +227,7 @@ cargo run -p lemontodo-tui -- tags <task-id-prefix> mvp terminal
 cargo run -p lemontodo-tui -- export ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- import ./lemontodo.snapshot.json
 cargo run -p lemontodo-tui -- ops
+cargo run -p lemontodo-tui -- register --server-url http://127.0.0.1:8787 --email you@example.com
 cargo run -p lemontodo-tui -- login --server-url http://127.0.0.1:8787 --email you@example.com
 cargo run -p lemontodo-tui -- sync
 cargo run -p lemontodo-tui -- sync status
@@ -210,6 +258,7 @@ ltd search sync
 ltd export ./lemontodo.snapshot.json
 ltd import ./lemontodo.snapshot.json
 ltd ops
+ltd register --server-url http://127.0.0.1:8787 --email you@example.com
 ltd login --server-url http://127.0.0.1:8787 --email you@example.com
 ltd sync
 ltd sync status
@@ -306,6 +355,12 @@ Inspect local sync state:
 ltd sync status
 ```
 
+Register a server account when server registration is enabled:
+
+```bash
+ltd register --server-url http://127.0.0.1:8787 --email you@example.com
+```
+
 Log in to a server account:
 
 ```bash
@@ -341,6 +396,7 @@ ltd sync apply
 `ltd sync` pulls and saves remote operations first, applies safe operations by default, and then pushes local pending operations. Pulling first avoids advancing the local cursor past remote changes that this device has not seen yet.
 The TUI can use the same sync path automatically after a one-time per-session master password unlock. It does not store the master password or decrypted vault key after the process exits.
 `ltd sync status` shows the configured server account email, whether an access token is stored locally, whether local vault metadata exists, and when possible also fetches the current remote account/session view from the server.
+`ltd register` creates the remote account, generates local encrypted vault metadata, uploads that metadata to the server, and saves the server URL plus account email locally. It prompts for the master password and confirmation when `--master-password` is not provided.
 `ltd login` verifies the server is reachable through the login request, authenticates with an auth hash derived from the account email and master password, downloads encrypted vault metadata, and verifies that the master password can unlock it before saving local session state.
 `ltd logout` clears the local token and, unless `--local-only` is used, revokes the current server session first. `ltd logout --all` revokes every active server session for the current account and then clears the local token.
 When the server rejects the stored token because it is invalid or expired, sync commands now return a direct hint to run `ltd login` again.

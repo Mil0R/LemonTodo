@@ -5,7 +5,7 @@
 ```text
 TUI client
 Web client
-React Native client later
+React Native Expo mobile client
   |
   v
 Shared core
@@ -41,7 +41,7 @@ crates/sync      protocol client and server-neutral sync logic
 crates/tui       terminal UI
 apps/web         browser client for project/task workflows
 crates/server    self-hosted sync server
-apps/mobile      future React Native shell
+apps/mobile      React Native Expo mobile client
 docs/            product, architecture, protocol, licensing
 ```
 
@@ -300,6 +300,25 @@ Recommended browser events:
 
 Do not implement a background service worker for MVP sync. The first browser version should be session-scoped and explicit.
 
+## Mobile Client Direction
+
+The first mobile client should use React Native with Expo and live under `apps/mobile`.
+
+This keeps the mobile implementation close to the existing TypeScript/React Web client, making it practical to share protocol DTOs, account/session behavior, sync client code, account-plan limits, and visual language. Flutter remains possible for unofficial or later clients, but it is not the preferred MVP path because it would require maintaining a second Dart implementation of client business logic.
+
+The mobile client must preserve the same account model:
+
+1. Server URL.
+2. Account email and account password for server authentication.
+3. Master password for local vault-key decryption.
+4. Encrypted object sync through the documented protocol.
+
+The mobile client should not introduce mobile-only sync semantics. Its first sync model should pull after unlock, push after local edits with a short debounce, pull on foreground return, show compact sync status, and keep manual sync available.
+
+Protocol-compatible Argon2 is implemented with a native module because the 64 MiB KDF is not practical in Expo Go's JavaScript runtime. Registration, login, and vault unlock therefore require an Expo development or production build. Expo Go is limited to UI-only work that does not exercise native crypto. A broader Rust shared-core bridge should still be deferred until duplication or protocol complexity justifies it.
+
+See `docs/mobile-app-plan.md` for the mobile UI flow and implementation phases.
+
 ## Self-Hosted Server
 
 First version should be a conventional self-hosted service, not a Cloudflare-specific implementation.
@@ -352,6 +371,7 @@ LEMONTODO_BILLING_ENABLED=false
 LEMONTODO_BILLING_PROVIDER=
 LEMONTODO_BILLING_MONTHLY_PRICE_CENTS=0
 LEMONTODO_BILLING_CURRENCY=USD
+LEMONTODO_CORS_ALLOW_ORIGIN=
 
 LEMONTODO_SIGNUPS_ALLOWED=false
 LEMONTODO_INVITES_ALLOWED=true

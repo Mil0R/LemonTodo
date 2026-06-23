@@ -36,6 +36,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.23"
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread"] }
+tower-http = { version = "0.6", features = ["cors"] }
 unicode-width = "0.2"
 ureq = { version = "3.1", features = ["json"] }
 uuid = { version = "1.19", features = ["serde", "v4"] }

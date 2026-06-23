@@ -6,7 +6,7 @@ This file guides coding agents working on LemonTodo.
 
 LemonTodo is a developer-first, local-first, end-to-end encrypted Todo app.
 
-The first user interface is a terminal TUI. A Web client is a supported second surface for project/task workflows. A React Native app may be added later, but business logic must remain in a shared core.
+The first user interface is a terminal TUI. A Web client is a supported second surface for project/task workflows. The planned mobile client should use React Native with Expo, but business logic must remain aligned with the shared core and documented sync protocol.
 
 Do not expand the MVP into a general notes app, project-management suite, Notion clone, or Joplin clone.
 
@@ -17,6 +17,7 @@ Do not expand the MVP into a general notes app, project-management suite, Notion
 - Official hosted service may be added later and may charge for server resources.
 - Self-hosting must remain free.
 - Optional billing is disabled by default. When disabled, all accounts are Premium. When enabled, new non-admin accounts default to Free and only Premium accounts can create projects beyond Inbox.
+- Mobile app direction is React Native with Expo under `apps/mobile`.
 - Server-side storage is blind: clients encrypt before upload.
 - Server administrators must not be able to read user Todo content.
 - Account password is for server authentication.
@@ -62,6 +63,7 @@ Implement first:
 - Admin bootstrap for self-hosted server.
 - Registration policy controlled by environment/config.
 - Web client for project/task workflows with session-scoped auto sync.
+- Mobile client for Android and iOS project/task workflows.
 
 Do not implement in MVP:
 

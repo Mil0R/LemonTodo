@@ -5,6 +5,11 @@
   "private": true,
   "scripts": {
     "e2e:register": "playwright test tests/register-page.spec.mjs",
+    "mobile:start": "npm --prefix apps/mobile run start",
+    "mobile:typecheck": "npm --prefix apps/mobile run typecheck",
+    "mobile:web": "npm --prefix apps/mobile run web",
+    "server:dev": "cargo run -p lemontodo-server",
+    "server:dev:local": "LEMONTODO_SERVER_HOST=0.0.0.0 LEMONTODO_SERVER_PORT=8787 LEMONTODO_ALLOW_REGISTRATION=true LEMONTODO_CORS_ALLOW_ORIGIN=http://localhost:8082 cargo run -p lemontodo-server",
     "web:dev": "npm --prefix apps/web run dev",
     "web:build": "npm --prefix apps/web run build",
     "web:preview": "npm --prefix apps/web run preview"

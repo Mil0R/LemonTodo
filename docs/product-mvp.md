@@ -9,6 +9,7 @@ The MVP is:
 - A developer-first Todo List.
 - TUI-first.
 - Web second.
+- Mobile planned with React Native and Expo.
 - Local-first.
 - End-to-end encrypted when synced.
 - Self-host friendly.
@@ -65,6 +66,34 @@ It should not start with:
 - Key management screens.
 - Raw protocol inspection.
 - Backend admin tools.
+
+## Mobile Client MVP Scope
+
+The mobile client should be a focused Android and iOS surface for the same project/task workflows as the TUI and Web client.
+
+It should cover:
+
+- Server URL setup.
+- Account login and registration when allowed by the server.
+- Registration collects email, master password, and master password confirmation after server URL validation.
+- Master password unlock.
+- Project list as the main screen.
+- Task list per project.
+- Fast task creation with title only.
+- Task detail editing for note, due date, and tags.
+- Task completion, archive, and delete.
+- Encrypted sync using the same protocol as TUI and Web.
+- Free and Premium account behavior from `/v1/account/me`.
+
+It should not start with:
+
+- Mobile-only sync semantics.
+- Background daemon sync.
+- Internal sync debugging screens.
+- Hosted-service-only flows.
+- Complex project-management features.
+
+Free mobile users can use Inbox but cannot create, rename, archive, or delete projects. Premium mobile users can manage projects. Task creation remains available inside allowed projects.
 
 ## TUI Interaction Baseline
 

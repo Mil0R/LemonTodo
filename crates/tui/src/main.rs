@@ -125,6 +125,17 @@ enum Command {
     },
     /// Inspect pending local operations for future sync.
     Ops,
+    /// Register a LemonTodo server account and save local vault metadata.
+    Register {
+        #[arg(long)]
+        email: Option<String>,
+        /// Development/script compatibility. Prefer hidden prompt.
+        #[arg(long)]
+        master_password: Option<String>,
+        /// Override the default server URL for this registration.
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Log into a LemonTodo server account.
     Login {
         #[arg(long)]
@@ -555,6 +566,13 @@ fn main() -> Result<()> {
         }) => {
             run_login_command(&store, email, master_password, server_url, &db_path)?;
         }
+        Some(Command::Register {
+            email,
+            master_password,
+            server_url,
+        }) => {
+            run_register_command(&store, email, master_password, server_url)?;
+        }
         Some(Command::Logout {
             local_only,
             all,
@@ -592,13 +610,7 @@ fn main() -> Result<()> {
                     master_password,
                     server_url,
                 } => {
-                    let master_password = master_password
-                        .map(Ok)
-                        .unwrap_or_else(prompt_new_master_password)?;
-                    let response =
-                        register_account(&store, server_url.as_deref(), &email, &master_password)?;
-                    store.save_sync_account_email(&response.email)?;
-                    println!("Registered account {}", response.email);
+                    run_register_command(&store, Some(email), master_password, server_url)?;
                 }
                 SyncCommand::Login {
                     email,
@@ -1220,6 +1232,47 @@ fn run_login_command(
             saved, applied.applied
         );
     }
+    Ok(())
+}
+
+fn run_register_command(
+    store: &TodoStore,
+    email: Option<String>,
+    master_password: Option<String>,
+    server_url: Option<String>,
+) -> Result<()> {
+    let server_url = match server_url {
+        Some(server_url) => server_url,
+        None => {
+            let default = store
+                .sync_server_url()?
+                .unwrap_or_else(|| DEFAULT_SERVER_URL.to_owned());
+            if io::stdin().is_terminal() {
+                let input = prompt_text(&format!("Server [{default}]: "))?;
+                if input.is_empty() { default } else { input }
+            } else {
+                default
+            }
+        }
+    };
+    let email = match email {
+        Some(email) => email,
+        None => prompt_text("Account email: ")?,
+    };
+    if email.trim().is_empty() {
+        anyhow::bail!("account email cannot be empty");
+    }
+    let master_password = master_password
+        .map(Ok)
+        .unwrap_or_else(prompt_new_master_password)?;
+    let response = register_account(store, Some(&server_url), &email, &master_password)?;
+    store.save_sync_server_url(&server_url)?;
+    store.save_sync_account_email(&response.email)?;
+    println!("Registered account {}", response.email);
+    println!(
+        "Run `ltd login --email {}` to create a sync session.",
+        response.email
+    );
     Ok(())
 }
 
@@ -2449,7 +2502,12 @@ fn default_db_path() -> PathBuf {
 
 fn default_db_path_for_command(command: &Option<Command>) -> PathBuf {
     match command {
-        Some(Command::Login {
+        Some(Command::Register {
+            email: Some(email),
+            server_url,
+            ..
+        })
+        | Some(Command::Login {
             email: Some(email),
             server_url,
             ..
@@ -2479,7 +2537,10 @@ fn default_db_path_for_command(command: &Option<Command>) -> PathBuf {
 
 fn resolve_default_db_path_for_command(command: &mut Option<Command>) -> Option<PathBuf> {
     match command {
-        Some(Command::Login {
+        Some(Command::Register {
+            email, server_url, ..
+        })
+        | Some(Command::Login {
             email, server_url, ..
         })
         | Some(Command::Sync {

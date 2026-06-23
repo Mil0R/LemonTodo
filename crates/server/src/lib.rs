@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::State,
-    http::{Response, StatusCode, Uri, header},
+    http::{HeaderValue, Method, Response, StatusCode, Uri, header},
     response::Html,
     routing::get,
 };
@@ -30,6 +30,7 @@ use lemontodo_sync::{
 use rand::rngs::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 const DEFAULT_HOST: &str = "0.0.0.0";
@@ -508,6 +509,7 @@ pub struct ServerConfig {
     pub register_wasm_dir: PathBuf,
     pub web_static_dir: PathBuf,
     pub web_client_url: String,
+    pub cors_allow_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -610,6 +612,9 @@ impl ServerConfig {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_WEB_CLIENT_URL.to_owned());
+        let cors_allow_origin = lookup("LEMONTODO_CORS_ALLOW_ORIGIN")
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty());
 
         Ok(Self {
             host,
@@ -623,6 +628,7 @@ impl ServerConfig {
             register_wasm_dir,
             web_static_dir,
             web_client_url,
+            cors_allow_origin,
         })
     }
 
@@ -1243,7 +1249,8 @@ pub struct HealthResponse {
 }
 
 pub fn app(state: AppState) -> Router {
-    Router::new()
+    let cors_allow_origin = state.config.cors_allow_origin.clone();
+    let router = Router::new()
         .route("/", get(web_client_index))
         .route("/login", get(login_page))
         .route("/console", get(console_page))
@@ -1272,7 +1279,21 @@ pub fn app(state: AppState) -> Router {
         .route("/v1/sync/push", axum::routing::post(sync_push))
         .route("/v1/sync/pull", axum::routing::post(sync_pull))
         .route("/{*path}", get(web_client_asset))
-        .with_state(state)
+        .with_state(state);
+
+    if let Some(origin) = cors_allow_origin {
+        let Ok(origin) = origin.parse::<HeaderValue>() else {
+            return router;
+        };
+        router.layer(
+            CorsLayer::new()
+                .allow_origin(origin)
+                .allow_methods([Method::GET, Method::POST, Method::PUT])
+                .allow_headers([header::CONTENT_TYPE]),
+        )
+    } else {
+        router
+    }
 }
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
@@ -3278,6 +3299,7 @@ mod tests {
             register_wasm_dir: PathBuf::from(DEFAULT_REGISTER_WASM_DIR),
             web_static_dir: PathBuf::from(DEFAULT_WEB_STATIC_DIR),
             web_client_url: DEFAULT_WEB_CLIENT_URL.to_owned(),
+            cors_allow_origin: None,
         }
     }
 

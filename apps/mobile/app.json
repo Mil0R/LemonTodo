@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "LemonTodo",
+    "slug": "lemontodo",
+    "owner": "mil0r",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "lemontodo",
+    "ios": {
+      "bundleIdentifier": "app.lemontodo.mobile",
+      "buildNumber": "1",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "app.lemontodo.mobile",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "backgroundColor": "#0d1117",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "d38e6479-d384-40a1-92ad-aa483816ebfd"
+      }
+    }
+  }
+}
