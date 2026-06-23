@@ -135,12 +135,22 @@ LEMONTODO_BILLING_MONTHLY_PRICE_CENTS=0
 LEMONTODO_BILLING_CURRENCY=USD
 LEMONTODO_SESSION_TTL_SECS=2592000
 LEMONTODO_ADMIN_EMAIL=
-LEMONTODO_ADMIN_PASSWORD=
 LEMONTODO_REGISTER_WASM_DIR=target/register-wasm
 LEMONTODO_CORS_ALLOW_ORIGIN=
 ```
 
 When billing is disabled, every account is treated as `premium` and can create projects without limits. When `LEMONTODO_BILLING_ENABLED=true`, new non-admin accounts default to `free`; Free clients can only use Inbox, while Premium accounts can create projects. Supported billing provider values are `stripe`, `creem`, and `dodopayments`.
+
+`LEMONTODO_ADMIN_EMAIL` promotes an existing client-registered account to administrator at server startup. It never creates an account or changes credentials. Register the account through Web, TUI, or Mobile first so its encrypted vault is initialized, then set the variable and restart the server. Do not configure the administrator email before registration on a public server without email verification.
+
+For a Docker Compose deployment, initialize the administrator in this order:
+
+1. Set `LEMONTODO_ALLOW_REGISTRATION=true` and leave `LEMONTODO_ADMIN_EMAIL` empty in `.env`.
+2. Run `docker compose up -d` and register the account through a client.
+3. Set `LEMONTODO_ALLOW_REGISTRATION=false` and `LEMONTODO_ADMIN_EMAIL` to the registered email.
+4. Run `docker compose up -d --force-recreate` and confirm the log contains `Promoted registered account ... to administrator`.
+
+Accounts created by older images from `LEMONTODO_ADMIN_PASSWORD` have no encrypted vault metadata and cannot be repaired from the server because the server must not receive the master password. Register a normal account with a different email and promote that account. Remove the legacy row manually only if the original email must be reused and the database has been backed up first.
 
 Build the browser-side account WASM bundle before using `/register` or `/`:
 
@@ -417,7 +427,7 @@ ltd sync keygen
 ltd sync pack --key <vault-key-hex> --out ./sync-pack.json
 ```
 
-This is still an E2EE sync dry-run. It can log in with a derived auth hash to obtain a local access token, inspect the current authenticated account/session, list and revoke active sessions/devices, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, enforce server-configured session TTL expiry, upload and download encrypted vault metadata, bootstrap an admin from server environment variables, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement full conflict resolution yet.
+This is still an E2EE sync dry-run. It can log in with a derived auth hash to obtain a local access token, inspect the current authenticated account/session, list and revoke active sessions/devices, connect a new device by verifying downloaded vault metadata with the master password, revoke the current session, enforce server-configured session TTL expiry, upload and download encrypted vault metadata, promote a registered account to administrator from server configuration, upload encrypted objects with authenticated user isolation, decrypt pulled objects, store them in a local pending-apply inbox, and apply safe remote creates plus safe task updates/archives. It does not implement full conflict resolution yet.
 Use `ltd ops` to inspect pending local operations and their object revisions.
 After a successful local or scripted upload simulation, mark uploaded operations as synced:
 

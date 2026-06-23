@@ -130,14 +130,13 @@ The server must support:
 - public registration enabled
 - public registration disabled
 - invite-only registration
-- admin bootstrap through environment/config
+- administrator promotion through environment/config
 
-Admin bootstrap must only create the first admin when no admin exists. Restarting the server must not overwrite an existing admin password.
+Administrator configuration must only promote an existing client-registered account with initialized encrypted vault metadata. It must never create an account, receive a master password, or overwrite account credentials.
 
 Prefer file-based secrets for production:
 
 ```env
-LEMONTODO_ADMIN_PASSWORD_FILE=/run/secrets/admin_password
 LEMONTODO_JWT_SECRET_FILE=/run/secrets/jwt_secret
 ```
 

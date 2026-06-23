@@ -336,7 +336,7 @@ Minimum server responsibilities:
 
 - user auth
 - session/token management
-- admin bootstrap
+- administrator promotion
 - registration/invite policy
 - optional billing configuration and account plan metadata
 - encrypted vault metadata
@@ -377,18 +377,18 @@ LEMONTODO_SIGNUPS_ALLOWED=false
 LEMONTODO_INVITES_ALLOWED=true
 
 LEMONTODO_ADMIN_EMAIL=admin@example.com
-LEMONTODO_ADMIN_PASSWORD_FILE=/run/secrets/admin_password
 LEMONTODO_JWT_SECRET_FILE=/run/secrets/jwt_secret
 ```
 
-Plain password environment variables may be supported for local development, but file-based secrets should be documented for production.
-
 Supported billing provider values are `stripe`, `creem`, and `dodopayments`. Provider credentials and checkout/webhook handlers are provider-specific server concerns; they must update server-side account plan metadata without exposing encrypted Todo content.
 
-Admin bootstrap behavior:
+Administrator promotion behavior:
 
-- If no admin exists, create the admin from environment/config.
-- If an admin already exists, do not overwrite credentials on restart.
+- Register the account through an E2EE client before configuring it as administrator.
+- On startup, promote the existing account matching `LEMONTODO_ADMIN_EMAIL` to Admin and Premium.
+- Never create an account, accept a master password, replace credentials, or initialize vault metadata from server configuration.
+- If the configured account does not exist, keep the server running and emit an actionable warning.
+- If a legacy configured account has no encrypted vault metadata, revoke its administrator role and emit an actionable warning.
 - Admins can manage users and invites, but cannot inspect encrypted user data.
 
 ## Registration Policy

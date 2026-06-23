@@ -505,7 +505,6 @@ pub struct ServerConfig {
     pub billing: BillingConfig,
     pub session_ttl_secs: i64,
     pub admin_email: Option<String>,
-    pub admin_password: Option<String>,
     pub register_wasm_dir: PathBuf,
     pub web_static_dir: PathBuf,
     pub web_client_url: String,
@@ -597,11 +596,6 @@ impl ServerConfig {
         let admin_email = lookup("LEMONTODO_ADMIN_EMAIL")
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let admin_password = read_optional_secret(
-            &mut lookup,
-            "LEMONTODO_ADMIN_PASSWORD",
-            "LEMONTODO_ADMIN_PASSWORD_FILE",
-        )?;
         let register_wasm_dir = lookup("LEMONTODO_REGISTER_WASM_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_REGISTER_WASM_DIR));
@@ -624,7 +618,6 @@ impl ServerConfig {
             billing,
             session_ttl_secs,
             admin_email,
-            admin_password,
             register_wasm_dir,
             web_static_dir,
             web_client_url,
@@ -648,10 +641,25 @@ pub struct AppState {
 impl AppState {
     pub fn open(config: ServerConfig) -> Result<Self> {
         let mut store = ServerStore::open(&config.database_path)?;
-        store.ensure_admin_user(
-            config.admin_email.as_deref(),
-            config.admin_password.as_deref(),
-        )?;
+        match store.promote_admin_by_email(config.admin_email.as_deref())? {
+            AdminPromotion::Disabled => {}
+            AdminPromotion::Promoted(email) => {
+                println!("Promoted registered account {email} to administrator");
+            }
+            AdminPromotion::AlreadyAdmin(email) => {
+                println!("Administrator account {email} is configured");
+            }
+            AdminPromotion::AccountNotFound(email) => {
+                eprintln!(
+                    "Administrator account {email} was not found; register it with a client, then restart the server"
+                );
+            }
+            AdminPromotion::VaultNotInitialized(email) => {
+                eprintln!(
+                    "Administrator account {email} has no encrypted vault metadata; its administrator role was revoked because it cannot be used by clients. Register a different account or remove this legacy bootstrap account before registering it again"
+                );
+            }
+        }
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             config,
@@ -661,6 +669,15 @@ impl AppState {
 
 pub struct ServerStore {
     conn: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdminPromotion {
+    Disabled,
+    Promoted(String),
+    AlreadyAdmin(String),
+    AccountNotFound(String),
+    VaultNotInitialized(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,22 +720,31 @@ impl ServerStore {
         Ok(store)
     }
 
-    pub fn ensure_admin_user(
-        &mut self,
-        admin_email: Option<&str>,
-        admin_password: Option<&str>,
-    ) -> Result<Option<UserAccount>> {
+    fn promote_admin_by_email(&mut self, admin_email: Option<&str>) -> Result<AdminPromotion> {
         let Some(email) = admin_email.map(str::trim).filter(|email| !email.is_empty()) else {
-            return Ok(None);
+            return Ok(AdminPromotion::Disabled);
         };
-        let Some(password) = admin_password.filter(|password| !password.is_empty()) else {
-            return Ok(None);
+        let email = normalize_email(email)?;
+        let Some(user) = self.find_user_by_email(&email)? else {
+            return Ok(AdminPromotion::AccountNotFound(email));
         };
-        if self.find_user_by_email(email)?.is_some() {
-            return Ok(None);
+        if user.encrypted_vault_key_json.is_none() {
+            if user.is_admin {
+                self.conn.execute(
+                    "UPDATE users SET is_admin = 0 WHERE id = ?1",
+                    params![user.id.to_string()],
+                )?;
+            }
+            return Ok(AdminPromotion::VaultNotInitialized(email));
         }
-        self.create_user(email, password, true, AccountPlan::Premium)
-            .map(Some)
+        if user.is_admin {
+            return Ok(AdminPromotion::AlreadyAdmin(email));
+        }
+        self.conn.execute(
+            "UPDATE users SET is_admin = 1, account_plan = 'premium' WHERE id = ?1",
+            params![user.id.to_string()],
+        )?;
+        Ok(AdminPromotion::Promoted(email))
     }
 
     pub fn create_user(
@@ -2022,22 +2048,6 @@ fn default_database_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".lemontodo-server.db"))
 }
 
-fn read_optional_secret(
-    lookup: &mut impl FnMut(&str) -> Option<String>,
-    value_key: &str,
-    file_key: &str,
-) -> Result<Option<String>> {
-    if let Some(path) = lookup(file_key)
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        let value = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {file_key} at {path}"))?;
-        return Ok(Some(value.trim_end_matches(['\r', '\n']).to_owned()));
-    }
-    Ok(lookup(value_key).filter(|value| !value.is_empty()))
-}
-
 fn session_ttl(config: &ServerConfig) -> Duration {
     Duration::seconds(config.session_ttl_secs)
 }
@@ -2265,7 +2275,6 @@ mod tests {
         );
         assert_eq!(config.session_ttl_secs, DEFAULT_SESSION_TTL_SECS);
         assert_eq!(config.admin_email, None);
-        assert_eq!(config.admin_password, None);
         assert_eq!(config.web_static_dir, PathBuf::from(DEFAULT_WEB_STATIC_DIR));
         assert_eq!(config.web_client_url, DEFAULT_WEB_CLIENT_URL);
     }
@@ -2283,7 +2292,6 @@ mod tests {
             ("LEMONTODO_BILLING_CURRENCY", "eur"),
             ("LEMONTODO_SESSION_TTL_SECS", "3600"),
             ("LEMONTODO_ADMIN_EMAIL", "admin@example.com"),
-            ("LEMONTODO_ADMIN_PASSWORD", "dev-password"),
             ("LEMONTODO_WEB_STATIC_DIR", "/srv/lemontodo/web"),
             ("LEMONTODO_WEB_CLIENT_URL", "/"),
         ]);
@@ -2308,28 +2316,8 @@ mod tests {
         );
         assert_eq!(config.session_ttl_secs, 3600);
         assert_eq!(config.admin_email, Some("admin@example.com".to_owned()));
-        assert_eq!(config.admin_password, Some("dev-password".to_owned()));
         assert_eq!(config.web_static_dir, PathBuf::from("/srv/lemontodo/web"));
         assert_eq!(config.web_client_url, "/");
-    }
-
-    #[test]
-    fn loads_admin_password_from_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let password_path = dir.path().join("admin_password");
-        std::fs::write(&password_path, "file-secret\n").unwrap();
-        let env = HashMap::from([
-            (
-                "LEMONTODO_ADMIN_PASSWORD_FILE",
-                password_path.to_str().unwrap(),
-            ),
-            ("LEMONTODO_ADMIN_PASSWORD", "ignored-dev-secret"),
-        ]);
-
-        let config =
-            ServerConfig::from_lookup(|key| env.get(key).map(ToString::to_string)).unwrap();
-
-        assert_eq!(config.admin_password, Some("file-secret".to_owned()));
     }
 
     #[test]
@@ -2442,21 +2430,72 @@ mod tests {
     }
 
     #[test]
-    fn bootstraps_admin_user_once() {
+    fn promotes_only_registered_accounts_with_vault_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("server.db");
         let mut store = ServerStore::open(&db_path).unwrap();
-        let created = store
-            .ensure_admin_user(Some("admin@example.com"), Some("dev-password"))
-            .unwrap();
-        assert!(created.is_some());
-        assert_eq!(store.count_users().unwrap(), 1);
 
-        let created = store
-            .ensure_admin_user(Some("admin@example.com"), Some("dev-password"))
+        assert_eq!(
+            store
+                .promote_admin_by_email(Some("admin@example.com"))
+                .unwrap(),
+            AdminPromotion::AccountNotFound("admin@example.com".to_owned())
+        );
+        assert_eq!(store.count_users().unwrap(), 0);
+
+        store
+            .create_user(
+                "legacy@example.com",
+                "legacy-password",
+                true,
+                AccountPlan::Premium,
+            )
             .unwrap();
-        assert!(created.is_none());
-        assert_eq!(store.count_users().unwrap(), 1);
+        assert_eq!(
+            store
+                .promote_admin_by_email(Some("legacy@example.com"))
+                .unwrap(),
+            AdminPromotion::VaultNotInitialized("legacy@example.com".to_owned())
+        );
+        assert!(
+            !store
+                .find_user_by_email("legacy@example.com")
+                .unwrap()
+                .unwrap()
+                .is_admin
+        );
+
+        let encrypted_vault_key =
+            serde_json::to_string(&register_request("admin@example.com").encrypted_vault_key)
+                .unwrap();
+        store
+            .create_user_with_vault(
+                "admin@example.com",
+                "dev-auth-hash",
+                &encrypted_vault_key,
+                false,
+                AccountPlan::Free,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .promote_admin_by_email(Some("ADMIN@example.com"))
+                .unwrap(),
+            AdminPromotion::Promoted("admin@example.com".to_owned())
+        );
+        let admin = store
+            .find_user_by_email("admin@example.com")
+            .unwrap()
+            .unwrap();
+        assert!(admin.is_admin);
+        assert_eq!(admin.plan, AccountPlan::Premium);
+        assert_eq!(
+            store
+                .promote_admin_by_email(Some("admin@example.com"))
+                .unwrap(),
+            AdminPromotion::AlreadyAdmin("admin@example.com".to_owned())
+        );
+        assert_eq!(store.count_users().unwrap(), 2);
     }
 
     #[tokio::test]
@@ -2511,6 +2550,59 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(user.plan, AccountPlan::Free);
+    }
+
+    #[tokio::test]
+    async fn registered_account_is_promoted_after_configured_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("server.db");
+        let mut registration_config = test_server_config(database_path.clone());
+        registration_config.allow_registration = true;
+        registration_config.billing = BillingConfig {
+            enabled: true,
+            provider: Some(BillingProvider::Stripe),
+            monthly_price_cents: 900,
+            currency: "USD".to_owned(),
+        };
+        let registration_state = AppState::open(registration_config).unwrap();
+        let Json(registered) = account_register(
+            State(registration_state.clone()),
+            Json(register_request("admin@example.com")),
+        )
+        .await
+        .unwrap();
+        assert!(!registered.is_admin);
+        drop(registration_state);
+
+        let mut restarted_config = test_server_config(database_path);
+        restarted_config.billing = BillingConfig {
+            enabled: true,
+            provider: Some(BillingProvider::Stripe),
+            monthly_price_cents: 900,
+            currency: "USD".to_owned(),
+        };
+        restarted_config.admin_email = Some("admin@example.com".to_owned());
+        let restarted_state = AppState::open(restarted_config).unwrap();
+        let Json(login) = account_login(
+            State(restarted_state.clone()),
+            Json(LoginRequest {
+                email: "admin@example.com".to_owned(),
+                auth_hash: "dev-auth-hash".to_owned(),
+                device_id: Uuid::new_v4(),
+                device_name: "test-device".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let mut query = HashMap::new();
+        query.insert("access_token".to_owned(), login.access_token);
+        let Json(status) = account_me(State(restarted_state), axum::extract::Query(query))
+            .await
+            .unwrap();
+
+        assert!(status.is_admin);
+        assert!(status.has_vault_key);
+        assert_eq!(status.plan, AccountPlan::Premium);
     }
 
     #[tokio::test]
@@ -3295,7 +3387,6 @@ mod tests {
             },
             session_ttl_secs: DEFAULT_SESSION_TTL_SECS,
             admin_email: None,
-            admin_password: None,
             register_wasm_dir: PathBuf::from(DEFAULT_REGISTER_WASM_DIR),
             web_static_dir: PathBuf::from(DEFAULT_WEB_STATIC_DIR),
             web_client_url: DEFAULT_WEB_CLIENT_URL.to_owned(),
