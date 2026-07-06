@@ -305,7 +305,8 @@ function App() {
   const isPremium = account?.plan === "premium";
   const visibleTasks = filterTasks(state.tasks, state.search, selectedProject?.id ?? null);
   const selectedTask =
-    state.tasks.find((task) => task.id === state.selectedTaskId) ?? visibleTasks[0] ?? null;
+    state.tasks.find((task) => task.id === state.selectedTaskId) ?? null;
+  const activeTask = selectedTask ?? visibleTasks[0] ?? null;
 
   const projectCounts = projects.map((project) => {
     const tasks = state.tasks.filter((task) => task.projectId === project.id);
@@ -748,7 +749,7 @@ function App() {
           <div className="task-list" role="list" aria-label="Tasks">
             {visibleTasks.length ? (
               visibleTasks.map((task) => {
-                const active = task.id === selectedTask?.id;
+                const active = task.id === activeTask?.id;
                 return (
                   <button
                     key={task.id}
